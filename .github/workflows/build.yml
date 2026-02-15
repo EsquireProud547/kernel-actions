@@ -3,6 +3,7 @@ name: 🐧 构建 Linux 内核 (BBRv3/原版可选)
 on:
   workflow_dispatch:
     inputs:
+      # 目标处理器架构选择
       arch:
         description: 目标架构
         required: true
@@ -11,11 +12,13 @@ on:
         options:
           - x86_64
           - arm64
+      # BBRv3 拥塞控制算法集成开关
       enable_bbrv3:
         description: 🚀 集成 Google BBRv3 TCP 拥塞控制
         required: true
         default: true
         type: boolean
+      # 编译器工具链选择
       compiler:
         description: 🔧 选择编译器
         required: true
@@ -28,11 +31,13 @@ on:
           - clang-17
           - clang-18
           - clang-19
+      # 自定义内核版本后缀标识
       custom_suffix:
         description: 🏷️ 自定义版本后缀 (仅小写字母/数字，不超过50字符)
         required: false
         default: ''
         type: string
+      # 内核配置覆写选项
       disable_unused_configs:
         description: 🚫 应用禁用配置 (disabled_kernel_configs.txt)
         required: true
@@ -48,6 +53,7 @@ on:
         required: true
         default: false
         type: boolean
+      # 历史记录清理控制
       cleanup_history:
         description: 🧹 清理历史工作流记录
         required: true
@@ -59,25 +65,31 @@ on:
         default: false
         type: boolean
 
+# 全局环境变量配置
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   CCACHE_DIR: /home/runner/.ccache
   CCACHE_MAXSIZE: 2G
 
 jobs:
+  # 历史记录清理任务
   cleanup:
     name: 🧹 清理任务
     if: ${{ inputs.cleanup_history == true || inputs.cleanup_only == true }}
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
     steps:
-      - name: 🧹 删除旧工作流
+      - name: 删除旧工作流记录
         uses: Mattraks/delete-workflow-runs@main
         with:
           retain_days: 0
           keep_minimum_runs: 0
-      - name: ✅ 清理完成
+      - name: 确认清理完成
         run: echo "✅ 历史记录已清理"
 
+  # 主构建任务
   build:
     name: 🔨 编译内核
     needs: cleanup
@@ -87,23 +99,29 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: 📥 检出代码
+      # 代码检出
+      - name: 检出仓库代码
         uses: actions/checkout@v4
 
-      - name: 🔐 验证输入参数
+      # 输入参数合法性校验
+      - name: 验证输入参数
         run: |
+          # 架构有效性检查
           [[ "${{ inputs.arch }}" =~ ^(x86_64|arm64)$ ]] || { echo "❌ 非法架构"; exit 1; }
+          # 编译器选项有效性检查
           [[ "${{ inputs.compiler }}" =~ ^(gcc-default|gcc-15|gcc-16|clang-17|clang-18|clang-19)$ ]] || { echo "❌ 非法编译器"; exit 1; }
-          # 对于 arm64 架构，禁止选择 GCC 15/16（因交叉编译器包名不通用）
+          # arm64 架构不支持 GCC 15/16（缺少交叉编译器支持）
           if [[ "${{ inputs.arch }}" == "arm64" && "${{ inputs.compiler }}" =~ ^gcc-(15|16)$ ]]; then
             echo "❌ 对于 arm64 架构，不支持选择 GCC 15/16，请使用 gcc-default 或 clang。"
             exit 1
           fi
+          # 自定义后缀格式校验
           SUFFIX="${{ inputs.custom_suffix }}"
           if [[ -n "$SUFFIX" ]]; then
             [[ ${#SUFFIX} -le 50 ]] || { echo "❌ 后缀超长"; exit 1; }
             [[ "$SUFFIX" =~ ^[a-z0-9]+$ ]] || { echo "❌ 后缀只能小写字母/数字"; exit 1; }
           fi
+          # 配置文件存在性检查
           check_file() {
             if [[ "$1" == "true" && ! -f "$2" ]]; then
               echo "❌ 缺少 $2"
@@ -115,13 +133,15 @@ jobs:
           check_file "${{ inputs.enable_module_configs }}" "moduled_kernel_configs.txt"
           echo "✅ 参数验证通过"
 
-      - name: 🆔 生成构建标识与时间戳
+      # 构建元数据生成
+      - name: 生成构建标识与时间戳
         run: |
           RAND=$(tr -dc 'a-z0-9' < /dev/urandom | head -c8)
           echo "RAND_SUFFIX=$RAND" >> "$GITHUB_ENV"
           echo "BUILD_DATE=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
 
-      - name: 🔍 获取上游版本信息
+      # 从 kernel.org 获取最新稳定版版本号
+      - name: 获取上游版本信息
         run: |
           for i in {1..5}; do
             JSON=$(curl -fsSL --retry 3 --retry-delay 5 -H 'User-Agent: Mozilla/5.0' https://www.kernel.org/releases.json 2>/dev/null)
@@ -129,38 +149,44 @@ jobs:
             [[ -n "$VERSION" && "$VERSION" != "null" ]] && break
             sleep 5
           done
+          # 备用方案：从 HTML 页面解析
           if [[ -z "$VERSION" ]]; then
             VERSION=$(curl -fsSL -H 'User-Agent: Mozilla/5.0' https://www.kernel.org | grep -A1 "stable:" | tail -1 | grep -oP '\d+\.\d+(\.\d+)?')
           fi
           [[ -n "$VERSION" ]] || { echo "❌ 无法获取内核版本"; exit 1; }
           echo "KERNEL_VERSION=$VERSION" >> "$GITHUB_ENV"
 
-      - name: 💥 释放磁盘空间
+      # 释放 GitHub Actions 运行器磁盘空间
+      - name: 释放磁盘空间
         run: |
           sudo rm -rf /usr/share/dotnet /opt/hostedtoolcache /usr/local/lib/android /usr/local/graalvm
           df -h
 
-      - name: 🛠️ 安装基础依赖与交叉编译工具链
+      # 安装编译依赖和交叉编译工具链
+      - name: 安装基础依赖与交叉编译工具链
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y git build-essential ccache libncurses-dev libssl-dev libelf-dev \
             bison bc flex rsync debhelper dpkg-dev fakeroot kmod cpio dwarves lz4 zstd xz-utils \
             curl jq openssl initramfs-tools libdw-dev software-properties-common
+          # arm64 架构额外安装交叉编译器
           if [[ "${{ inputs.arch }}" == "arm64" ]]; then
             sudo apt-get install -y binutils-aarch64-linux-gnu libc6-dev-arm64-cross
           fi
+          # 添加新版 GCC 和 LLVM 源
           sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
           wget -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh
           chmod +x /tmp/llvm.sh
 
-      - name: ⚙️ 配置编译器环境
+      # 配置编译器环境变量
+      - name: 配置编译器环境
         run: |
           ARCH="${{ inputs.arch }}"
           COMPILER="${{ inputs.compiler }}"
           echo "ARCH=$ARCH" >> "$GITHUB_ENV"
 
           case "$COMPILER" in
-            gcc-default)  GCC_VER=14 ;;  # 仅用于 x86_64 时的默认版本，arm64 会单独处理
+            gcc-default)  GCC_VER=14 ;;
             gcc-15)       GCC_VER=15 ;;
             gcc-16)       GCC_VER=16 ;;
             clang-17)     CLANG_VER=17 ;;
@@ -170,39 +196,34 @@ jobs:
 
           if [[ "$COMPILER" == gcc* ]]; then
             if [[ "$ARCH" == "arm64" ]]; then
-              # arm64 下仅支持 gcc-default（即安装无版本号的交叉编译器）
-              if [[ "$COMPILER" == "gcc-default" ]]; then
-                sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-                echo "CC=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-                echo "CXX=aarch64-linux-gnu-g++" >> "$GITHUB_ENV"
-                echo "CROSS_COMPILE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
-                echo "COMPILER_NAME=GCC (default)" >> "$GITHUB_ENV"
-                echo "CACHE_KEY_COMPILER=gcc-default" >> "$GITHUB_ENV"
-              else
-                # 理论上已被输入验证拦截，但以防万一
-                echo "❌ 不支持的编译器组合"
-                exit 1
-              fi
+              # arm64 使用默认版本交叉编译器（无版本号后缀）
+              sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+              echo "CC=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+              echo "CXX=aarch64-linux-gnu-g++" >> "$GITHUB_ENV"
+              echo "CROSS_COMPILE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
+              echo "COMPILER_NAME=GCC (default)" >> "$GITHUB_ENV"
+              echo "CACHE_KEY_COMPILER=gcc-default" >> "$GITHUB_ENV"
             else
-              # x86_64：安装带版本号的 gcc
+              # x86_64 使用带版本号的 GCC
               sudo apt-get install -y gcc-${GCC_VER} g++-${GCC_VER}
               echo "CC=gcc-${GCC_VER}" >> "$GITHUB_ENV"
               echo "CXX=g++-${GCC_VER}" >> "$GITHUB_ENV"
               echo "COMPILER_NAME=GCC ${GCC_VER}" >> "$GITHUB_ENV"
               echo "CACHE_KEY_COMPILER=gcc-${GCC_VER}" >> "$GITHUB_ENV"
             fi
-          else  # clang
+          else
+            # Clang 编译器配置
             sudo /tmp/llvm.sh ${CLANG_VER}
             sudo apt-get install -y clang-${CLANG_VER} lld-${CLANG_VER} llvm-${CLANG_VER}
             if [[ "$ARCH" == "arm64" ]]; then
               echo "CC=clang-${CLANG_VER} --target=aarch64-linux-gnu" >> "$GITHUB_ENV"
               echo "CXX=clang++-${CLANG_VER} --target=aarch64-linux-gnu" >> "$GITHUB_ENV"
-              # 提供基础交叉工具链（用于链接等）
               sudo apt-get install -y gcc-aarch64-linux-gnu
             else
               echo "CC=clang-${CLANG_VER}" >> "$GITHUB_ENV"
               echo "CXX=clang++-${CLANG_VER}" >> "$GITHUB_ENV"
             fi
+            # 配置 LLVM 工具链
             for tool in ar nm strip objcopy objdump readelf; do
               echo "${tool^^}=llvm-${tool}-${CLANG_VER}" >> "$GITHUB_ENV"
             done
@@ -212,13 +233,15 @@ jobs:
             echo "/usr/lib/llvm-${CLANG_VER}/bin" >> "$GITHUB_PATH"
           fi
 
-      - name: 💾 配置 ccache
+      # ccache 缓存目录初始化
+      - name: 配置 ccache
         run: |
           mkdir -p "$CCACHE_DIR"
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           ccache --set-config=max_size="$CCACHE_MAXSIZE" --set-config=compression=true
 
-      - name: ♻️ 恢复 ccache
+      # 恢复之前保存的 ccache 缓存
+      - name: 恢复 ccache
         id: cache-restore
         uses: actions/cache/restore@v4
         with:
@@ -229,7 +252,8 @@ jobs:
             kernel-cache-${{ env.KERNEL_VERSION }}-${{ inputs.enable_bbrv3 }}-
             kernel-cache-${{ env.KERNEL_VERSION }}-
 
-      - name: 📦 获取内核源码
+      # 克隆内核源码仓库
+      - name: 获取内核源码
         run: |
           mkdir -p kernel && cd kernel
           MINOR=$(echo "${{ env.KERNEL_VERSION }}" | grep -oP '^\d+\.\d+')
@@ -244,7 +268,8 @@ jobs:
             echo "FEATURE_TAG=Vanilla" >> "$GITHUB_ENV"
           fi
 
-      - name: 📝 修正内核版本号
+      # 同步 Makefile 中的版本号与目标版本
+      - name: 修正内核版本号
         working-directory: kernel/linux
         run: |
           V=$(echo "${{ env.KERNEL_VERSION }}" | cut -d. -f1)
@@ -254,7 +279,8 @@ jobs:
           sed -i "s/^PATCHLEVEL *=.*/PATCHLEVEL = $P/" Makefile
           [[ -n "$S" ]] && sed -i "s/^SUBLEVEL *=.*/SUBLEVEL = $S/" Makefile
 
-      - name: ⚙️ 应用内核配置
+      # 应用内核配置文件和自定义配置
+      - name: 应用内核配置
         working-directory: kernel/linux
         run: |
           if [[ -f "${{ github.workspace }}/kernel.config" ]]; then
@@ -262,8 +288,10 @@ jobs:
           else
             make ARCH=${{ env.ARCH }} defconfig
           fi
+          # 禁用签名验证（GitHub Actions 环境无密钥）
           scripts/config --disable SYSTEM_TRUSTED_KEYS --disable SYSTEM_REVOCATION_KEYS
 
+          # 批量处理配置文件
           handle_config() {
             file="$1"; mode="$2"
             [[ ! -f "$file" ]] && return
@@ -284,8 +312,8 @@ jobs:
           make ARCH=${{ env.ARCH }} olddefconfig ${{ env.MAKE_ARGS }}
           mkdir -p ../configs && cp .config ../configs/final_build.config
 
-      # 设置 Debian 包的目标架构环境变量（确保生成的 .deb 架构正确）
-      - name: 🎯 设置目标 Debian 架构
+      # 设置 Debian 包目标架构
+      - name: 设置目标 Debian 架构
         run: |
           if [[ "${{ inputs.arch }}" == "x86_64" ]]; then
             echo "DEB_HOST_ARCH=amd64" >> "$GITHUB_ENV"
@@ -293,15 +321,17 @@ jobs:
             echo "DEB_HOST_ARCH=arm64" >> "$GITHUB_ENV"
           fi
 
-      - name: 🔨 编译内核 (${{ inputs.arch }})
+      # 执行内核编译
+      - name: 编译内核 (${{ inputs.arch }})
         working-directory: kernel/linux
         timeout-minutes: 340
         run: |
+          # 构建本地版本标识字符串
           LOCAL_VER=""
           [[ "${{ inputs.enable_bbrv3 }}" == "true" ]] && LOCAL_VER="${LOCAL_VER}-bbrv3"
           LOCAL_VER="${LOCAL_VER}-${{ env.CACHE_KEY_COMPILER }}"
           [[ -n "${{ inputs.custom_suffix }}" ]] && LOCAL_VER="${LOCAL_VER}-${{ inputs.custom_suffix }}"
-          LOCAL_VER="${LOCAL_VER}-${{ env.RAND_SUFFIX }}-${{ inputs.arch }}"
+          LOCAL_VER="${LOCAL_VER}-${{ env.RAND_SUFFIX }}-${{ env.DEB_HOST_ARCH }}"
           make clean
           set +e
           make ARCH=${{ env.ARCH }} CROSS_COMPILE=${{ env.CROSS_COMPILE }} bindeb-pkg -j$(nproc) LOCALVERSION="$LOCAL_VER" ${{ env.MAKE_ARGS }} 2>&1 | tee ../build.log
@@ -312,13 +342,15 @@ jobs:
             exit 1
           fi
 
-      - name: 💾 保存 ccache
+      # 保存 ccache 缓存供下次使用
+      - name: 保存 ccache
         uses: actions/cache/save@v4
         with:
           path: ${{ env.CCACHE_DIR }}
           key: kernel-cache-${{ env.KERNEL_VERSION }}-${{ inputs.enable_bbrv3 }}-${{ env.CACHE_KEY_COMPILER }}-${{ inputs.arch }}
 
-      - name: 🔍 产物校验
+      # 验证编译产物完整性
+      - name: 产物校验
         working-directory: kernel
         run: |
           count=$(ls *.deb 2>/dev/null | wc -l)
@@ -328,15 +360,16 @@ jobs:
             [[ $size -ge 102400 ]] || echo "⚠️ 警告: $deb 文件过小 ($size bytes)"
           done
 
-      # 生成校验文件（SHA256）
-      - name: 📋 生成 checksum 文件
+      # 生成 SHA256 校验文件
+      - name: 生成 checksum 文件
         working-directory: kernel
         run: sha256sum *.deb > checksums.txt
 
-      - name: 📤 上传 Artifact
+      # 上传构建产物到 Actions Artifact
+      - name: 上传 Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-${{ env.KERNEL_VERSION }}-${{ env.RAND_SUFFIX }}-${{ inputs.arch }}
+          name: kernel-${{ env.KERNEL_VERSION }}-${{ env.RAND_SUFFIX }}-${{ env.DEB_HOST_ARCH }}
           path: |
             kernel/*.deb
             kernel/build.log
@@ -344,12 +377,13 @@ jobs:
             kernel/checksums.txt
           retention-days: 5
 
-      - name: 🚀 发布 Release (${{ inputs.arch }})
+      # 创建 GitHub Release 并上传
+      - name: 发布 Release
         if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.KERNEL_VERSION }}${{ env.CACHE_KEY_COMPILER != '' && format('-{0}', env.CACHE_KEY_COMPILER) || '' }}-${{ env.RAND_SUFFIX }}-${{ inputs.arch }}
-          name: Linux ${{ env.KERNEL_VERSION }} ${{ env.FEATURE_TAG }} [${{ env.RAND_SUFFIX }}] (${{ inputs.arch }})
+          tag_name: ${{ env.KERNEL_VERSION }}${{ env.CACHE_KEY_COMPILER != '' && format('-{0}', env.CACHE_KEY_COMPILER) || '' }}-${{ env.RAND_SUFFIX }}-${{ env.DEB_HOST_ARCH }}
+          name: Linux ${{ env.KERNEL_VERSION }} ${{ env.FEATURE_TAG }} [${{ env.RAND_SUFFIX }}] (${{ env.DEB_HOST_ARCH }})
           files: |
             kernel/*.deb
             kernel/configs/final_build.config
@@ -357,7 +391,7 @@ jobs:
           body: |
             ## 🐧 Linux Kernel ${{ env.KERNEL_VERSION }} Build
 
-            **架构**: ${{ inputs.arch }}
+            **架构**: ${{ inputs.arch }} (Debian: ${{ env.DEB_HOST_ARCH }})
             **源码**: ${{ env.SOURCE_TYPE }}
             **BBRv3**: ${{ inputs.enable_bbrv3 && '✅' || '❌' }}
             **编译器**: ${{ env.COMPILER_NAME }}
