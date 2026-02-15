@@ -136,7 +136,7 @@ jobs:
       # 构建元数据生成
       - name: 生成构建标识与时间戳
         run: |
-          RAND=$(tr -dc 'a-z0-9' < /dev/urandom | head -c8)
+          RAND=$(tr -dc 'a-z0-9' < /dev/urandom | head -c8 2>/dev/null)
           echo "RAND_SUFFIX=$RAND" >> "$GITHUB_ENV"
           echo "BUILD_DATE=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
 
@@ -220,8 +220,8 @@ jobs:
               echo "CXX=clang++-${CLANG_VER} --target=aarch64-linux-gnu" >> "$GITHUB_ENV"
               sudo apt-get install -y gcc-aarch64-linux-gnu
             else
-              echo "CC=clang-${CLANG_VER}" >> "$GITHUB_ENV"
-              echo "CXX=clang++-${CLANG_VER}" >> "$GITHUB_ENV"
+              echo "CC=clang-${CLANG_VER} --target=x86_64-linux-gnu" >> "$GITHUB_ENV"
+              echo "CXX=clang++-${CLANG_VER} --target=x86_64-linux-gnu" >> "$GITHUB_ENV"
             fi
             # 配置 LLVM 工具链
             for tool in ar nm strip objcopy objdump readelf; do
@@ -331,7 +331,7 @@ jobs:
           [[ "${{ inputs.enable_bbrv3 }}" == "true" ]] && LOCAL_VER="${LOCAL_VER}-bbrv3"
           LOCAL_VER="${LOCAL_VER}-${{ env.CACHE_KEY_COMPILER }}"
           [[ -n "${{ inputs.custom_suffix }}" ]] && LOCAL_VER="${LOCAL_VER}-${{ inputs.custom_suffix }}"
-          LOCAL_VER="${LOCAL_VER}-${{ env.RAND_SUFFIX }}-${{ env.DEB_HOST_ARCH }}"
+          LOCAL_VER="${LOCAL_VER}-${{ env.RAND_SUFFIX }}"
           make clean
           set +e
           make ARCH=${{ env.ARCH }} CROSS_COMPILE=${{ env.CROSS_COMPILE }} bindeb-pkg -j$(nproc) LOCALVERSION="$LOCAL_VER" ${{ env.MAKE_ARGS }} 2>&1 | tee ../build.log
