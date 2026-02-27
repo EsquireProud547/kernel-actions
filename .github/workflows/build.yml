@@ -74,7 +74,7 @@ jobs:
   build:
     name: 🔨 编译内核
     needs: cleanup
-    if: ${{ !inputs.cleanup_only && (needs.cleanup.result == 'success' || needs.cleanup.result == 'skipped') }}
+    if: ${{ always() && !inputs.cleanup_only && (needs.cleanup.result == 'success' || needs.cleanup.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
     permissions:
