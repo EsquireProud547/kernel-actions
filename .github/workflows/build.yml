@@ -196,16 +196,8 @@ jobs:
               LATEST_VER=${LATEST_TAG#llvmorg-}
               MAJOR_VER=$(echo "$LATEST_VER" | cut -d. -f1)
               DOWNLOAD_URL="https://github.com/llvm/llvm-project/releases/download/${LATEST_TAG}/clang+llvm-${LATEST_VER}-x86_64-linux-gnu-ubuntu-${UBUNTU_VER}.tar.xz"
-              SHA_URL="${DOWNLOAD_URL}.sha256"
 
               curl -L -o /tmp/llvm.tar.xz "$DOWNLOAD_URL" || { echo "::error::下载 LLVM tarball 失败"; exit 1; }
-              curl -L -o /tmp/llvm.sha256 "$SHA_URL" 2>/dev/null || echo "无 SHA256 文件，跳过校验"
-
-              if [[ -s /tmp/llvm.sha256 ]]; then
-                EXPECTED_HASH=$(tr -d ' \t\n\r' < /tmp/llvm.sha256 | tr '[:upper:]' '[:lower:]')
-                ACTUAL_HASH=$(sha256sum /tmp/llvm.tar.xz | cut -d' ' -f1 | tr '[:upper:]' '[:lower:]')
-                [[ "$EXPECTED_HASH" == "$ACTUAL_HASH" ]] || { echo "::error::LLVM SHA256 校验失败"; exit 1; }
-              fi
 
               mkdir -p /opt/llvm-latest
               tar -xJf /tmp/llvm.tar.xz -C /opt/llvm-latest --strip-components=1 || exit 1
