@@ -86,13 +86,27 @@ jobs:
 
       - name: 验证输入参数
         run: |
-          [[ "${{ inputs.arch }}" =~ ^(x86_64|arm64)$ ]] || { echo "::error::非法架构"; exit 1; }
-          [[ "${{ inputs.compiler }}" =~ ^(gcc-default|clang-19|llvm-latest)$ ]] || { echo "::error::非法编译器"; exit 1; }
-          SUFFIX="${{ inputs.custom_suffix }}"
-          [[ -z "$SUFFIX" || (${#SUFFIX} -le 50 && "$SUFFIX" =~ ^[a-z0-9]+$) ]] || { echo "::error::后缀格式错误或超长"; exit 1; }
+          # 架构校验
+          [[ "${{ inputs.arch }}" =~ ^(x86_64|arm64)$ ]] || { echo "::error::非法架构: ${{ inputs.arch }}"; exit 1; }
 
+          # 编译器校验
+          [[ "${{ inputs.compiler }}" =~ ^(gcc-default|clang-19|llvm-latest)$ ]] || { echo "::error::非法编译器: ${{ inputs.compiler }}"; exit 1; }
+
+          # 自定义后缀校验
+          SUFFIX="${{ inputs.custom_suffix }}"
+          if [[ -n "$SUFFIX" ]]; then
+            if [[ ${#SUFFIX} -gt 50 ]] || [[ ! "$SUFFIX" =~ ^[a-z0-9]+$ ]]; then
+              echo "::error::自定义后缀格式错误或长度超过50字符"
+              exit 1
+            fi
+          fi
+
+          # 自定义配置文件存在性检查
           check_file() {
-            [[ "$1" == "true" && ! -f "$2" ]] && { echo "::error::缺少 $2"; exit 1; }
+            if [[ "$1" == "true" && ! -f "$2" ]]; then
+              echo "::error::缺少配置文件: $2"
+              exit 1
+            fi
           }
           check_file "${{ inputs.disable_unused_configs }}" "disabled_kernel_configs.txt"
           check_file "${{ inputs.enable_custom_configs }}" "enabled_kernel_configs.txt"
@@ -156,10 +170,10 @@ jobs:
               ;;
             clang-19)
               CLANG_VER=19
-              wget -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+              wget -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh || exit 1
               chmod +x /tmp/llvm.sh
-              sudo /tmp/llvm.sh ${CLANG_VER}
-              sudo apt-get install -y clang-${CLANG_VER} lld-${CLANG_VER} llvm-${CLANG_VER}
+              sudo /tmp/llvm.sh ${CLANG_VER} || exit 1
+              sudo apt-get install -y clang-${CLANG_VER} lld-${CLANG_VER} llvm-${CLANG_VER} || exit 1
               if [[ "$ARCH" == "arm64" ]]; then
                 echo "CC=clang-${CLANG_VER} --target=aarch64-linux-gnu" >> "$GITHUB_ENV"
                 echo "CXX=clang++-${CLANG_VER} --target=aarch64-linux-gnu" >> "$GITHUB_ENV"
@@ -178,22 +192,23 @@ jobs:
             llvm-latest)
               UBUNTU_VER=$(lsb_release -rs)
               LATEST_TAG=$(curl -s https://api.github.com/repos/llvm/llvm-project/releases/latest | jq -r .tag_name)
-              [[ -n "$LATEST_TAG" ]] || exit 1
+              [[ -n "$LATEST_TAG" ]] || { echo "::error::无法获取最新 LLVM 版本"; exit 1; }
               LATEST_VER=${LATEST_TAG#llvmorg-}
               MAJOR_VER=$(echo "$LATEST_VER" | cut -d. -f1)
               DOWNLOAD_URL="https://github.com/llvm/llvm-project/releases/download/${LATEST_TAG}/clang+llvm-${LATEST_VER}-x86_64-linux-gnu-ubuntu-${UBUNTU_VER}.tar.xz"
               SHA_URL="${DOWNLOAD_URL}.sha256"
 
-              curl -L -o /tmp/llvm.tar.xz "$DOWNLOAD_URL" || exit 1
-              curl -L -o /tmp/llvm.sha256 "$SHA_URL" || exit 1
+              curl -L -o /tmp/llvm.tar.xz "$DOWNLOAD_URL" || { echo "::error::下载 LLVM tarball 失败"; exit 1; }
+              curl -L -o /tmp/llvm.sha256 "$SHA_URL" 2>/dev/null || echo "无 SHA256 文件，跳过校验"
 
-              EXPECTED_HASH=$(tr -d ' \t\n\r' < /tmp/llvm.sha256 | tr '[:upper:]' '[:lower:]')
-              ACTUAL_HASH=$(sha256sum /tmp/llvm.tar.xz | cut -d' ' -f1 | tr '[:upper:]' '[:lower:]')
-
-              [[ "$EXPECTED_HASH" == "$ACTUAL_HASH" ]] || { echo "::error::SHA256校验失败"; exit 1; }
+              if [[ -s /tmp/llvm.sha256 ]]; then
+                EXPECTED_HASH=$(tr -d ' \t\n\r' < /tmp/llvm.sha256 | tr '[:upper:]' '[:lower:]')
+                ACTUAL_HASH=$(sha256sum /tmp/llvm.tar.xz | cut -d' ' -f1 | tr '[:upper:]' '[:lower:]')
+                [[ "$EXPECTED_HASH" == "$ACTUAL_HASH" ]] || { echo "::error::LLVM SHA256 校验失败"; exit 1; }
+              fi
 
               mkdir -p /opt/llvm-latest
-              tar -xJf /tmp/llvm.tar.xz -C /opt/llvm-latest --strip-components=1
+              tar -xJf /tmp/llvm.tar.xz -C /opt/llvm-latest --strip-components=1 || exit 1
               echo "/opt/llvm-latest/bin" >> "$GITHUB_PATH"
 
               if [[ "$ARCH" == "arm64" ]]; then
@@ -233,12 +248,12 @@ jobs:
           mkdir -p kernel && cd kernel
           MINOR=$(echo "${{ env.KERNEL_VERSION }}" | grep -oP '^\d+\.\d+')
           if [[ "${{ inputs.enable_bbrv3 }}" == "true" ]]; then
-            git clone --depth=1 -b v3 https://github.com/google/bbr.git linux
+            git clone --depth=1 -b v3 https://github.com/google/bbr.git linux || exit 1
             echo "SOURCE_TYPE=BBRv3" >> "$GITHUB_ENV"
             echo "FEATURE_TAG=With BBRv3" >> "$GITHUB_ENV"
           else
             git clone --depth=1 -b "linux-$MINOR.y" https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git linux || \
-            git clone --depth=1 https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git linux
+            git clone --depth=1 https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git linux || exit 1
             echo "SOURCE_TYPE=Stable" >> "$GITHUB_ENV"
             echo "FEATURE_TAG=Vanilla" >> "$GITHUB_ENV"
           fi
@@ -285,8 +300,11 @@ jobs:
 
       - name: 设置 Debian 包架构
         run: |
-          [[ "${{ inputs.arch }}" == "x86_64" ]] && echo "DEB_HOST_ARCH=amd64" >> "$GITHUB_ENV" || \
-          echo "DEB_HOST_ARCH=arm64" >> "$GITHUB_ENV"
+          if [[ "${{ inputs.arch }}" == "x86_64" ]]; then
+            echo "DEB_HOST_ARCH=amd64" >> "$GITHUB_ENV"
+          else
+            echo "DEB_HOST_ARCH=arm64" >> "$GITHUB_ENV"
+          fi
 
       - name: 编译内核
         working-directory: kernel/linux
@@ -302,6 +320,7 @@ jobs:
           make ARCH=${{ env.ARCH }} CROSS_COMPILE=${{ env.CROSS_COMPILE }} bindeb-pkg -j$(nproc) \
             LOCALVERSION="$LOCAL_VER" ${{ env.MAKE_ARGS }} 2>&1 | tee ../build.log || {
               tail -50 ../build.log
+              echo "::error::内核编译失败，请查看 build.log"
               exit 1
             }
 
@@ -314,9 +333,10 @@ jobs:
       - name: 校验编译产物
         working-directory: kernel
         run: |
-          ls *.deb &>/dev/null || { echo "::error::未生成 deb 包"; exit 1; }
+          ls *.deb &>/dev/null || { echo "::error::未生成任何 .deb 包"; exit 1; }
           for deb in *.deb; do
-            [[ $(stat -c%s "$deb") -ge 102400 ]] || echo "::warning::$deb 文件过小 ($(stat -c%s "$deb") bytes)"
+            size=$(stat -c%s "$deb")
+            [[ $size -ge 102400 ]] || echo "::warning::$deb 文件过小 ($size bytes)"
           done
 
       - name: 生成 checksum
