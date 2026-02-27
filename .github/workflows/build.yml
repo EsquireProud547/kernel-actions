@@ -195,7 +195,7 @@ jobs:
               [[ -n "$LATEST_TAG" ]] || { echo "::error::无法获取最新 LLVM 版本"; exit 1; }
               LATEST_VER=${LATEST_TAG#llvmorg-}
               MAJOR_VER=$(echo "$LATEST_VER" | cut -d. -f1)
-              DOWNLOAD_URL="https://github.com/llvm/llvm-project/releases/download/${LATEST_TAG}/clang+llvm-${LATEST_VER}-x86_64-linux-gnu-ubuntu-${UBUNTU_VER}.tar.xz"
+              DOWNLOAD_URL="https://github.com/llvm/llvm-project/releases/download/${LATEST_TAG}/LLVM-${LATEST_VER}-Linux-X64.tar.xz"
 
               curl -L -o /tmp/llvm.tar.xz "$DOWNLOAD_URL" || { echo "::error::下载 LLVM tarball 失败"; exit 1; }
 
