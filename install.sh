@@ -1,6 +1,7 @@
 # Linux 内核与 BBRv3 管理脚本
 
-GitHub 仓库配置（格式：用户名/仓库名）请替换为实际仓库名GITHUB_REPO="EsquireProud547/kernel-actions"
+GitHub 仓库配置（格式：用户名/仓库名）请替换为实际仓库名
+GITHUB_REPO="EsquireProud547/kernel-actions"
 GREEN='\033[1;32m'
 YELLOW='\033[33m'
 BLUE='\033[36m'
