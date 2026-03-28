@@ -1,6 +1,6 @@
 # =============================================================================
 # 工作流名称：Linux 内核自动化构建系统 (x86_64)
-# 版本：2.0
+# 版本：2.1
 # 核心功能：自动化编译 x86_64 架构 Linux 内核，生成 .deb 安装包
 # 支持分支：主线 (Mainline) / 稳定版 (Stable) / 长期支持版 (LTS)
 # 编译器支持：GCC-14 / LLVM (自动获取最新稳定版)
@@ -27,7 +27,7 @@ on:
         type: choice
         options:
           - mainline       # 主线开发版 (RC)
-          - stable         # 最新稳定版
+          - stable         # 稳定版
           - longterm-6.12  # LTS 6.12.x
           - longterm-6.6   # LTS 6.6.x
           - longterm-6.1   # LTS 6.1.x
@@ -69,13 +69,10 @@ env:
   CCACHE_DIR: /home/runner/.ccache
   CCACHE_MAXSIZE: 2G
   ARCH: x86_64
-  # 禁用 GitHub API 默认令牌泄露风险（仅用于清理作业时需要）
-  # GITHUB_TOKEN 由 Actions 自动注入，此处不重复定义
 
 jobs:
   # ===========================================================================
   # 作业 1: 历史记录清理
-  # 触发条件: 用户选择 cleanup_history 或 cleanup_only
   # ===========================================================================
   cleanup:
     name: 🧹 清理历史记录
@@ -89,11 +86,10 @@ jobs:
         uses: Mattraks/delete-workflow-runs@main
         with:
           retain_days: 0
-          keep_minimum_runs: 1  # 保留最新一条避免误删当前运行
+          keep_minimum_runs: 1
 
   # ===========================================================================
   # 作业 2: 内核编译主流程
-  # 依赖: cleanup 作业完成（无论成功与否，只要不是被 cleanup_only 跳过）
   # ===========================================================================
   build:
     name: 🔨 编译内核 (${{ inputs.kernel_branch }})
@@ -102,7 +98,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     permissions:
-      contents: write  # 用于发布 Release
+      contents: write
     
     outputs:
       kernel_version: ${{ steps.kernel-version.outputs.version }}
@@ -115,11 +111,10 @@ jobs:
       - name: 📥 检出仓库代码
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1  # 仅获取最新提交，节省带宽
+          fetch-depth: 1
 
       # -----------------------------------------------------------------------
       # 步骤 2: 参数校验与预处理
-      # 检查配置文件是否存在，生成随机构建标识
       # -----------------------------------------------------------------------
       - name: 🔍 参数与环境校验
         run: |
@@ -147,8 +142,6 @@ jobs:
 
       # -----------------------------------------------------------------------
       # 步骤 3: 获取最新内核版本号 (多重容错机制)
-      # 数据源: https://www.kernel.org/releases.json (官方 API)
-      # 修复点: 增加分支存在性校验、null 值处理、降级策略
       # -----------------------------------------------------------------------
       - name: 🌐 获取内核版本号
         id: kernel-version
@@ -177,20 +170,15 @@ jobs:
           # 根据分支解析版本号
           case "$BRANCH" in
             mainline)
-              # mainline 没有 latest_mainline 字段，需从 releases 数组筛选
-              # 选择 moniker 为 mainline 的第一个版本（按发布时间排序）
               VERSION=$(echo "$RELEASES_JSON" | jq -r '[.releases[] | select(.moniker=="mainline")] | first | .version')
               ;;
             
             stable)
-              # 稳定版使用专用字段
               VERSION=$(echo "$RELEASES_JSON" | jq -r '.latest_stable.version')
               ;;
             
             longterm-*)
-              # LTS 版本: 提取分支基础版本号 (如 6.12)
               BASE_VER="${BRANCH#longterm-}"
-              # 先筛选所有 longterm，再用 grep 匹配版本前缀，最后取最新
               VERSION=$(echo "$RELEASES_JSON" | jq -r '[.releases[] | select(.moniker=="longterm" and (.version | startswith("'"$BASE_VER"'")))] | first | .version')
               ;;
             
@@ -203,8 +191,6 @@ jobs:
           # 校验结果有效性
           if [[ -z "$VERSION" || "$VERSION" == "null" || "$VERSION" == "undefined" ]]; then
             echo "::error::无法解析版本号！分支 [$BRANCH] 可能不存在或无可用版本"
-            echo "API 返回结构:"
-            echo "$RELEASES_JSON" | jq '.releases[:3]' || echo "(无法解析 JSON)"
             exit 1
           fi
           
@@ -220,7 +206,6 @@ jobs:
 
       # -----------------------------------------------------------------------
       # 步骤 4: 磁盘空间清理
-      # 清理不必要的预装软件，为内核源码和编译产物腾出空间 (~30GB)
       # -----------------------------------------------------------------------
       - name: 🧹 清理磁盘空间
         run: |
@@ -250,9 +235,6 @@ jobs:
 
       # -----------------------------------------------------------------------
       # 步骤 6: 编译器配置 (核心修复)
-      # GCC: 使用 Ubuntu Toolchain PPA 安装 GCC-14
-      # LLVM: 通过 GitHub API 获取最新稳定版本，使用官方 llvm.sh 安装
-      # 修复点: 原网页 grep 方式获取 LLVM 版本已失效，改用 GitHub Releases API
       # -----------------------------------------------------------------------
       - name: 🛠️ 配置编译器环境
         id: compiler-setup
@@ -264,19 +246,16 @@ jobs:
           if [[ "$COMPILER" == "gcc-default" ]]; then
             echo "🔧 配置 GCC-14 编译环境..."
             
-            # 添加 Ubuntu Toolchain PPA
             sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
             sudo apt-get update -qq
             sudo apt-get install -y gcc-14 g++-14
             
-            # 设置环境变量
-            {
-              echo "CC=gcc-14"
-              echo "CXX=g++-14"
-              echo "COMPILER_NAME=GCC 14"
-              echo "CACHE_KEY_COMPILER=gcc-14"
-              echo "MAKE_ARGS="
-            } >> "$GITHUB_ENV"
+            # 设置环境变量（显式写入 GITHUB_ENV）
+            echo "CC=gcc-14" >> "$GITHUB_ENV"
+            echo "CXX=g++-14" >> "$GITHUB_ENV"
+            echo "COMPILER_NAME=GCC 14" >> "$GITHUB_ENV"
+            echo "CACHE_KEY_COMPILER=gcc-14" >> "$GITHUB_ENV"
+            echo "MAKE_ARGS=" >> "$GITHUB_ENV"
             
             echo "info=GCC 14" >> "$GITHUB_OUTPUT"
             echo "✅ GCC-14 配置完成"
@@ -284,11 +263,7 @@ jobs:
           elif [[ "$COMPILER" == "llvm-latest" ]]; then
             echo "🔧 探测并安装最新 LLVM/Clang..."
             
-            # [核心修复] 使用 GitHub Releases API 获取最新 LLVM 版本
-            # 原方法: curl -sS https://apt.llvm.org/ | grep -oP 'LLVM \K[0-9]+'
-            # 问题: 网页内容变化导致抓取失效，当前仍返回 18 而非 22
-            # 解决: 直接查询 GitHub API 获取最新 release tag (如 llvmorg-22.1.2)
-            
+            # 使用 GitHub API 获取最新 LLVM 版本（修复原网页抓取失效问题）
             LLVM_TAG=$(curl -sL \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
@@ -296,27 +271,24 @@ jobs:
               jq -r '.tag_name')
             
             if [[ -z "$LLVM_TAG" || "$LLVM_TAG" == "null" ]]; then
-              echo "::warning::GitHub API 获取失败，使用备用方案 (固定版本 22)"
+              echo "::warning::GitHub API 获取失败，使用备用版本 22"
               LLVM_VER=22
             else
               # 提取主版本号 (22.1.2 -> 22)
               LLVM_VER=$(echo "$LLVM_TAG" | sed -E 's/llvmorg-//;s/-.*//;s/\.[0-9]+$//;s/\.[0-9]+$//')
               
-              # 校验版本号有效性 (数字检查)
+              # 校验版本号有效性
               if [[ ! "$LLVM_VER" =~ ^[0-9]+$ ]]; then
                 echo "::warning::解析版本号异常 ($LLVM_TAG -> $LLVM_VER)，使用默认版本 22"
                 LLVM_VER=22
               fi
             fi
             
-            echo "📦 正在安装 LLVM $LLVM_VER (来源: GitHub latest release $LLVM_TAG)..."
+            echo "📦 正在安装 LLVM $LLVM_VER (来源: $LLVM_TAG)..."
             
             # 使用官方 llvm.sh 脚本安装指定版本
-            # 脚本特性: 自动配置仓库、导入 GPG 密钥、处理依赖关系
             wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
             chmod +x /tmp/llvm.sh
-            
-            # 执行安装 (非交互模式，自动接受仓库配置)
             sudo bash /tmp/llvm.sh "$LLVM_VER" all
             
             # 安装内核编译所需的额外 LLVM 组件
@@ -328,15 +300,12 @@ jobs:
               clangd-"$LLVM_VER"
             
             # 设置内核编译环境变量
-            # LLVM=-<version> 是内核 Makefile 原生支持的方式，会自动查找 clang-22, ld.lld-22 等
-            {
-              echo "COMPILER_NAME=LLVM ${LLVM_VER}"
-              echo "CACHE_KEY_COMPILER=llvm-${LLVM_VER}"
-              echo "MAKE_ARGS=LLVM=-${LLVM_VER} LLVM_IAS=-${LLVM_VER}"
-            } >> "$GITHUB_ENV"
+            echo "COMPILER_NAME=LLVM ${LLVM_VER}" >> "$GITHUB_ENV"
+            echo "CACHE_KEY_COMPILER=llvm-${LLVM_VER}" >> "$GITHUB_ENV"
+            echo "MAKE_ARGS=LLVM=-${LLVM_VER} LLVM_IAS=-${LLVM_VER}" >> "$GITHUB_ENV"
             
             echo "info=LLVM ${LLVM_VER}" >> "$GITHUB_OUTPUT"
-            echo "✅ LLVM $LLVM_VER 配置完成 (基于 $LLVM_TAG)"
+            echo "✅ LLVM $LLVM_VER 配置完成"
             
           else
             echo "::error::未知编译器选项: $COMPILER"
@@ -345,7 +314,6 @@ jobs:
 
       # -----------------------------------------------------------------------
       # 步骤 7: ccache 配置
-      # 加速原理: 缓存编译中间结果，相同代码避免重复编译
       # -----------------------------------------------------------------------
       - name: ⚡ 配置 ccache 缓存
         run: |
@@ -362,7 +330,6 @@ jobs:
 
       # -----------------------------------------------------------------------
       # 步骤 8: 恢复 ccache 缓存（从之前的构建）
-      # 缓存键设计: kernel-{版本}-{编译器}-{架构}
       # -----------------------------------------------------------------------
       - name: ♻️ 恢复编译缓存
         uses: actions/cache/restore@v4
@@ -376,8 +343,6 @@ jobs:
 
       # -----------------------------------------------------------------------
       # 步骤 9: 下载 Linux 内核源码
-      # 策略: 使用浅克隆 (--depth=1) 节省时间和空间，直接切换到目标 tag
-      # 仓库选择: mainline -> torvalds/linux, 其他 -> stable/linux
       # -----------------------------------------------------------------------
       - name: 📥 克隆内核源码
         run: |
@@ -398,7 +363,7 @@ jobs:
           
           echo "📦 正在克隆 Linux $VERSION (标签: v$VERSION)..."
           
-          # 浅克隆指定标签 (--depth=1 仅下载最新快照，节省约 90% 时间和空间)
+          # 浅克隆指定标签
           git clone --depth=1 -b "v$VERSION" "$REPO" kernel/linux
           
           # 验证检出
@@ -408,7 +373,6 @@ jobs:
 
       # -----------------------------------------------------------------------
       # 步骤 10: 内核配置生成 (.config)
-      # 流程: 基础配置 -> 禁用冲突选项 -> 应用自定义配置 -> 依赖解析
       # -----------------------------------------------------------------------
       - name: ⚙️ 生成内核配置
         working-directory: kernel/linux
@@ -428,10 +392,8 @@ jobs:
           
           # 2. 关键兼容性修复 (避免常见编译失败)
           echo "🛡️ 应用兼容性补丁..."
-          # 禁用证书验证: GitHub Actions 环境缺少内核编译默认的证书文件
           scripts/config --disable SYSTEM_TRUSTED_KEYS
           scripts/config --disable SYSTEM_REVOCATION_KEYS
-          # 禁用 BTF debug 信息: 需要 pahole 特定版本，易引发工具链不匹配
           scripts/config --disable DEBUG_INFO_BTF
           
           # 3. 用户自定义配置注入函数
@@ -459,15 +421,9 @@ jobs:
               [[ -z "$config_name" ]] && continue
               
               case "$mode" in
-                enable)  
-                  scripts/config --enable "$config_name" && ((count++))
-                  ;;
-                disable) 
-                  scripts/config --disable "$config_name" && ((count++))
-                  ;;
-                module)  
-                  scripts/config --module "$config_name" && ((count++))
-                  ;;
+                enable)  scripts/config --enable "$config_name" && ((count++)) ;;
+                disable) scripts/config --disable "$config_name" && ((count++)) ;;
+                module)  scripts/config --module "$config_name" && ((count++)) ;;
               esac
             done < "$file"
             
@@ -490,45 +446,56 @@ jobs:
           
           # 7. 配置摘要
           echo "📊 配置摘要:"
-          grep -c "^CONFIG_" .config || echo "无法统计"
-          grep -c "=y" .config || echo "0"
-          grep -c "=m" .config || echo "0"
+          local total enabled modules
+          total=$(grep -c "^CONFIG_" .config 2>/dev/null || echo "0")
+          enabled=$(grep -c "=y" .config 2>/dev/null || echo "0")
+          modules=$(grep -c "=m" .config 2>/dev/null || echo "0")
+          echo "   总配置项: $total, 内置: $enabled, 模块: $modules"
 
       # -----------------------------------------------------------------------
-      # 步骤 11: 编译内核
-      # 目标: bindeb-pkg (生成 Debian 安装包)
-      # 参数说明:
-      #   - bindeb-pkg: 构建 deb 包
-      #   - -j$(nproc): 并行编译，使用所有 CPU 核心
-      #   - LOCALVERSION: 自定义版本后缀（标识编译器和构建）
+      # 步骤 11: 编译内核 (修复点：移除所有 ${VAR:-default} 语法)
       # -----------------------------------------------------------------------
       - name: 🚀 编译内核
         working-directory: kernel/linux
         timeout-minutes: 340
+        env:
+          # 在此处设置编译器默认值，避免在 run 中使用 ${CC:-gcc}
+          BUILD_CC: ${{ env.CC }}
+          BUILD_CXX: ${{ env.CXX }}
         run: |
           set -eo pipefail
           
           echo "🧹 清理旧编译产物..."
           make clean 2>/dev/null || true
           
+          # 设置编译器默认值（如果环境变量未设置）
+          CC_COMPILER="${BUILD_CC:-gcc}"
+          CXX_COMPILER="${BUILD_CXX:-g++}"
+          
           echo "🔨 开始编译:"
           echo "   版本: Linux ${{ env.KERNEL_VERSION }}"
           echo "   编译器: ${{ env.COMPILER_NAME }}"
           echo "   并行任务: $(nproc) 线程"
           echo "   本地版本后缀: -${{ env.CACHE_KEY_COMPILER }}-${{ env.RAND_SUFFIX }}"
+          echo "   使用编译器: CC=$CC_COMPILER, CXX=$CXX_COMPILER"
           
           # 执行编译
           if ! make ARCH=x86_64 bindeb-pkg \
             -j$(nproc) \
             LOCALVERSION="-${{ env.CACHE_KEY_COMPILER }}-${{ env.RAND_SUFFIX }}" \
             ${{ env.MAKE_ARGS }} \
-            CC="${CC:-gcc}" \
-            CXX="${CXX:-g++}" \
+            CC="$CC_COMPILER" \
+            CXX="$CXX_COMPILER" \
             2>&1 | tee ../build.log; then
-            echo "::error::编译失败，查看日志："
-            tail -n 200 ../build.log
+            
+            echo "::error::❌ 编译失败！"
+            echo "📄 错误日志（最后 200 行）："
+            tail -n 200 ../build.log || true
             exit 1
           fi
+          
+          echo "✅ 编译成功！"
+          ls -lh ../*.deb 2>/dev/null || echo "::warning::未找到生成的 deb 包"
 
       # -----------------------------------------------------------------------
       # 步骤 12: 保存 ccache 缓存
@@ -538,7 +505,6 @@ jobs:
         with:
           path: ${{ env.CCACHE_DIR }}
           key: kernel-${{ env.KERNEL_VERSION }}-${{ env.CACHE_KEY_COMPILER }}-x86_64-${{ github.run_id }}
-          # 注意: restore-keys 在保存时不需要，仅用于 restore 步骤
 
       # -----------------------------------------------------------------------
       # 步骤 13: 产物校验与元数据生成
@@ -568,16 +534,16 @@ jobs:
             echo "COMPILER=${{ env.COMPILER_NAME }}"
             echo "BRANCH=${{ inputs.kernel_branch }}"
             echo "BUILD_ID=${{ env.RAND_SUFFIX }}"
+            echo "CCACHE_SIZE=$(ccache -s | grep 'cache size' | awk '{print $3}')"
           } > build-metadata.txt
           
           echo "✅ 产物校验完成:"
-          cat checksums.txt | while read line; do
+          cat checksums.txt | while read -r line; do
             echo "   ✓ $line"
           done
 
       # -----------------------------------------------------------------------
       # 步骤 14: 上传构建产物到 Artifacts
-      # 保留 7 天，包含 deb 包、日志、配置、校验和
       # -----------------------------------------------------------------------
       - name: 📤 上传 Artifacts
         uses: actions/upload-artifact@v4
@@ -595,14 +561,13 @@ jobs:
 
       # -----------------------------------------------------------------------
       # 步骤 15: 发布 GitHub Release
-      # 仅在编译成功时执行，提供用户友好的下载和安装说明
       # -----------------------------------------------------------------------
       - name: 🎉 发布 Release
         if: success()
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.KERNEL_VERSION }}-${{ env.CACHE_KEY_COMPILER }}-${{ env.RAND_SUFFIX }}
-          name: Linux ${{ env.KERNEL_VERSION }} (${{ inputs.kernel_branch }}) - ${{ env.COMPILER_NAME }}
+          name: Linux ${{ env.KERNEL_VERSION }} [${{ inputs.kernel_branch }}] (${{ env.COMPILER_NAME }})
           files: |
             kernel/*.deb
             kernel/configs/final.config
@@ -629,10 +594,8 @@ jobs:
             # 3. 安装内核及头文件（必须同时安装）
             sudo dpkg -i linux-image-*.deb linux-headers-*.deb
             
-            # 4. 更新引导加载器 (通常 dpkg 会自动处理)
-            sudo update-grub2  # Debian/Ubuntu 系统
-            # 或
-            sudo grub2-mkconfig -o /boot/grub2/grub.cfg  # RHEL/CentOS/Fedora
+            # 4. 更新引导加载器
+            sudo update-grub2
             
             # 5. 重启系统
             sudo reboot
@@ -643,11 +606,5 @@ jobs:
             - 基于 Git 标签: `v${{ env.KERNEL_VERSION }}`
             - 配置文件: 参见 `final.config` (Artifacts 中下载)
             - 完整构建日志: 参见 `build.log`
-            
-            ### ⚠️ 注意事项
-            
-            - 安装前建议备份重要数据
-            - 如遇启动失败，请在启动菜单选择旧版本内核进入 Recovery Mode
-            - 本构建使用 `${{ env.CC:-gcc }}` 编译器，与系统默认 GCC 可能存在差异
           generate_release_notes: false
           fail_on_unmatched_files: true
