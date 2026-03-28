@@ -1,9 +1,6 @@
 # =============================================================================
-# 工作流名称：Linux 内核自动化构建系统 (x86_64)
-# 版本：2.3
-# 核心功能：自动化编译 x86_64 架构 Linux 内核，生成 .deb 安装包
-# 支持分支：主线 (Mainline) / 稳定版 (Stable) / 长期支持版 (LTS)
-# 编译器支持：GCC-14 / LLVM (自动获取最新稳定版)
+# Linux 内核自动化构建系统 (x86_64) v2.4
+# 支持: Mainline/Stable/LTS | GCC-14/LLVM | x86_64
 # =============================================================================
 
 name: 🐧 Linux 内核构建 (x86_64)
@@ -12,89 +9,79 @@ on:
   workflow_dispatch:
     inputs:
       compiler:
-        description: '🛠️ 编译器选择'
+        description: '编译器'
         required: true
         default: 'gcc-default'
         type: choice
         options:
-          - gcc-default    # GCC-14 (Ubuntu 官方仓库)
-          - llvm-latest    # 最新稳定版 LLVM/Clang (通过 GitHub API 自动探测)
+          - gcc-default
+          - llvm-latest
       
       kernel_branch:
-        description: '🌿 内核源码分支'
+        description: '分支'
         required: true
         default: 'stable'
         type: choice
         options:
-          - mainline       # 主线开发版 (RC)
-          - stable         # 稳定版
-          - longterm-6.12  # LTS 6.12.x
-          - longterm-6.6   # LTS 6.6.x
-          - longterm-6.1   # LTS 6.1.x
-          - longterm-5.15  # LTS 5.15.x
-          - longterm-5.10  # LTS 5.10.x
+          - mainline
+          - stable
+          - longterm-6.12
+          - longterm-6.6
+          - longterm-6.1
+          - longterm-5.15
+          - longterm-5.10
       
       disable_unused_configs:
-        description: '❌ 禁用配置 (disabled_kernel_configs.txt)'
+        description: '禁用配置'
         required: true
         default: false
         type: boolean
       
       enable_custom_configs:
-        description: '✅ 启用配置 (enabled_kernel_configs.txt)'
+        description: '启用配置'
         required: true
         default: false
         type: boolean
       
       enable_module_configs:
-        description: '🧩 模块配置 (moduled_kernel_configs.txt)'
+        description: '模块配置'
         required: true
         default: false
         type: boolean
       
       cleanup_history:
-        description: '🧹 清理历史工作流记录'
+        description: '清理历史'
         required: true
         default: false
         type: boolean
       
       cleanup_only:
-        description: '⚠️ 仅执行清理 (跳过构建)'
+        description: '仅清理'
         required: true
         default: false
         type: boolean
 
-# 全局环境变量
 env:
   CCACHE_DIR: /home/runner/.ccache
   CCACHE_MAXSIZE: 2G
   ARCH: x86_64
-  # 适配 Node.js 24（解决 Node 20 弃用警告）
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # ===========================================================================
-  # 作业 1: 历史记录清理
-  # ===========================================================================
   cleanup:
-    name: 🧹 清理历史记录
+    name: 🧹 清理
     if: ${{ inputs.cleanup_history || inputs.cleanup_only }}
     runs-on: ubuntu-latest
     permissions:
       actions: write
-      contents: read
     steps:
-      - name: 删除旧工作流运行记录
-        uses: Mattraks/delete-workflow-runs@main
+      - uses: Mattraks/delete-workflow-runs@main
         with:
           retain_days: 0
           keep_minimum_runs: 1
 
-  # ===========================================================================
-  # 作业 2: 内核编译主流程
-  # ===========================================================================
   build:
-    name: 🔨 编译内核 (${{ inputs.kernel_branch }})
+    name: 🔨 编译
     needs: cleanup
     if: ${{ always() && !inputs.cleanup_only && (needs.cleanup.result == 'success' || needs.cleanup.result == 'skipped') }}
     runs-on: ubuntu-latest
@@ -103,137 +90,74 @@ jobs:
       contents: write
     
     outputs:
-      kernel_version: ${{ steps.kernel-version.outputs.version }}
-      compiler_info: ${{ steps.compiler-setup.outputs.info }}
+      kernel_version: ${{ steps.version.outputs.version }}
+      compiler_info: ${{ steps.compiler.outputs.info }}
     
     steps:
-      # -----------------------------------------------------------------------
-      # 步骤 1: 检出仓库代码
-      # -----------------------------------------------------------------------
-      - name: 📥 检出仓库代码
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      # -----------------------------------------------------------------------
-      # 步骤 2: 参数校验与预处理
-      # -----------------------------------------------------------------------
-      - name: 🔍 参数与环境校验
+      - name: 🔍 环境校验
         run: |
           set -euo pipefail
           
-          # 配置文件存在性检查函数
           check_file() {
-            local enabled="$1"
-            local filepath="$2"
-            
-            if [[ "$enabled" == "true" && ! -f "$filepath" ]]; then
-              echo "::error::配置开关已启用，但缺少必要的配置文件: $filepath"
-              exit 1
-            fi
+            [[ "$1" == "true" && ! -f "$2" ]] && { echo "::error::缺少配置: $2"; exit 1; }
           }
           
           check_file "${{ inputs.disable_unused_configs }}" "disabled_kernel_configs.txt"
           check_file "${{ inputs.enable_custom_configs }}" "enabled_kernel_configs.txt"
           check_file "${{ inputs.enable_module_configs }}" "moduled_kernel_configs.txt"
           
-          # 生成 8 位随机后缀（使用 openssl 避免 broken pipe）
+          # 生成随机后缀（避免 tr|head broken pipe）
           RAND_SUFFIX=$(openssl rand -hex 4 2>/dev/null || echo "00000000")
-          
           echo "RAND_SUFFIX=$RAND_SUFFIX" >> "$GITHUB_ENV"
-          echo "✅ 环境校验通过，构建标识: $RAND_SUFFIX"
+          echo "✅ 构建标识: $RAND_SUFFIX"
 
-      # -----------------------------------------------------------------------
-      # 步骤 3: 获取最新内核版本号（修复：支持 -rcX 等后缀）
-      # -----------------------------------------------------------------------
-      - name: 🌐 获取内核版本号
-        id: kernel-version
+      - name: 🌐 获取版本
+        id: version
         run: |
           set -euo pipefail
           
           BRANCH="${{ inputs.kernel_branch }}"
-          API_URL="https://www.kernel.org/releases.json"
+          API="https://www.kernel.org/releases.json"
           
-          echo "📡 正在从 kernel.org 获取分支 [$BRANCH] 的最新版本..."
-          
-          # 下载 API 数据（带重试机制）
           for i in {1..3}; do
-            if RELEASES_JSON=$(curl -fsSL --retry 3 --retry-delay 2 "$API_URL"); then
-              break
-            fi
-            echo "⚠️ 第 $i 次尝试获取版本信息失败，等待重试..."
+            JSON=$(curl -fsSL --retry 3 "$API") && break
             sleep 5
           done
           
-          if [[ -z "${RELEASES_JSON:-}" ]]; then
-            echo "::error::无法连接到 kernel.org API，请检查网络或稍后重试"
-            exit 1
-          fi
+          [[ -z "${JSON:-}" ]] && { echo "::error::无法连接 kernel.org"; exit 1; }
           
-          # 根据分支解析版本号
           case "$BRANCH" in
-            mainline)
-              VERSION=$(echo "$RELEASES_JSON" | jq -r '[.releases[] | select(.moniker=="mainline")] | first | .version')
+            mainline)  VER=$(echo "$JSON" | jq -r '[.releases[]|select(.moniker=="mainline")]|first|.version') ;;
+            stable)    VER=$(echo "$JSON" | jq -r '.latest_stable.version') ;;
+            longterm-*) 
+              BASE="${BRANCH#longterm-}"
+              VER=$(echo "$JSON" | jq -r '[.releases[]|select(.moniker=="longterm" and (.version|startswith("'"$BASE"'")))]|first|.version')
               ;;
-            
-            stable)
-              VERSION=$(echo "$RELEASES_JSON" | jq -r '.latest_stable.version')
-              ;;
-            
-            longterm-*)
-              BASE_VER="${BRANCH#longterm-}"
-              VERSION=$(echo "$RELEASES_JSON" | jq -r '[.releases[] | select(.moniker=="longterm" and (.version | startswith("'"$BASE_VER"'")))] | first | .version')
-              ;;
-            
-            *)
-              echo "::error::未知的分支类型: $BRANCH"
-              exit 1
-              ;;
+            *) echo "::error::未知分支: $BRANCH"; exit 1 ;;
           esac
           
-          # 校验结果有效性
-          if [[ -z "$VERSION" || "$VERSION" == "null" || "$VERSION" == "undefined" ]]; then
-            echo "::error::无法解析版本号！分支 [$BRANCH] 可能不存在或无可用版本"
-            exit 1
-          fi
+          [[ -z "$VER" || "$VER" == "null" ]] && { echo "::error::无法获取版本"; exit 1; }
           
-          # 校验版本号格式（修复：支持 -rcX, -next, -git 等后缀）
-          # 主线版如 7.0-rc5, 6.11-rc1 都应被接受
-          # 正则解释：
-          #   [0-9]+\.[0-9]+            -> 主版本.次版本 (如 6.12, 7.0)
-          #   (\.[0-9]+)?               -> 可选的补丁版本 (如 .8)
-          #   (-[a-zA-Z0-9\.\-]+)?      -> 可选的后缀 (如 -rc5, -next-20241001, -git)
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?(-[a-zA-Z0-9\.\-]+)?$ ]]; then
-            echo "::error::获取到的版本号格式异常: $VERSION"
-            echo "::error::期望格式: X.Y, X.Y.Z, X.Y-rcN, X.Y.Z-rcN 等"
-            exit 1
-          fi
+          # 支持 7.0-rc5 等格式
+          [[ ! "$VER" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?(-[a-zA-Z0-9\.\-]+)?$ ]] && {
+            echo "::error::版本格式异常: $VER"; exit 1
+          }
           
-          echo "KERNEL_VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "✅ 成功获取目标版本: Linux $VERSION"
+          echo "KERNEL_VERSION=$VER" >> "$GITHUB_ENV"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "✅ 目标版本: Linux $VER"
 
-      # -----------------------------------------------------------------------
-      # 步骤 4: 磁盘空间清理
-      # -----------------------------------------------------------------------
-      - name: 🧹 清理磁盘空间
+      - name: 🧹 清理空间
         run: |
-          echo "🗑️ 正在清理磁盘空间..."
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/hostedtoolcache
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/local/graalvm
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-          sudo apt-get clean
-          sudo apt-get autoremove -y
-          echo "✅ 磁盘空间清理完成"
+          sudo rm -rf /usr/share/dotnet /opt/hostedtoolcache /usr/local/{lib/android,graalvm,share/boost} "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean && sudo apt-get autoremove -y
           df -h /
 
-      # -----------------------------------------------------------------------
-      # 步骤 5: 安装系统依赖（添加 openssl）
-      # -----------------------------------------------------------------------
-      - name: 📦 安装构建依赖
+      - name: 📦 安装依赖
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
@@ -242,214 +166,124 @@ jobs:
             lz4 zstd xz-utils curl jq openssl initramfs-tools libdw-dev \
             software-properties-common wget ca-certificates gnupg lsb-release
 
-      # -----------------------------------------------------------------------
-      # 步骤 6: 编译器配置
-      # -----------------------------------------------------------------------
-      - name: 🛠️ 配置编译器环境
-        id: compiler-setup
+      - name: 🛠️ 配置编译器
+        id: compiler
         run: |
           set -euo pipefail
+          COMP="${{ inputs.compiler }}"
           
-          COMPILER="${{ inputs.compiler }}"
-          
-          if [[ "$COMPILER" == "gcc-default" ]]; then
-            echo "🔧 配置 GCC-14 编译环境..."
-            
+          if [[ "$COMP" == "gcc-default" ]]; then
             sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
-            sudo apt-get update -qq
-            sudo apt-get install -y gcc-14 g++-14
+            sudo apt-get update -qq && sudo apt-get install -y gcc-14 g++-14
             
             echo "CC=gcc-14" >> "$GITHUB_ENV"
             echo "CXX=g++-14" >> "$GITHUB_ENV"
             echo "COMPILER_NAME=GCC 14" >> "$GITHUB_ENV"
             echo "CACHE_KEY_COMPILER=gcc-14" >> "$GITHUB_ENV"
             echo "MAKE_ARGS=" >> "$GITHUB_ENV"
-            
             echo "info=GCC 14" >> "$GITHUB_OUTPUT"
-            echo "✅ GCC-14 配置完成"
-            
-          elif [[ "$COMPILER" == "llvm-latest" ]]; then
-            echo "🔧 探测并安装最新 LLVM/Clang..."
-            
-            LLVM_TAG=$(curl -sL \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/llvm/llvm-project/releases/latest" | \
-              jq -r '.tag_name')
-            
-            if [[ -z "$LLVM_TAG" || "$LLVM_TAG" == "null" ]]; then
-              echo "::warning::GitHub API 获取失败，使用备用版本 22"
-              LLVM_VER=22
-            else
-              LLVM_VER=$(echo "$LLVM_TAG" | sed -E 's/llvmorg-//;s/-.*//;s/\.[0-9]+$//;s/\.[0-9]+$//')
-              
-              if [[ ! "$LLVM_VER" =~ ^[0-9]+$ ]]; then
-                echo "::warning::解析版本号异常 ($LLVM_TAG -> $LLVM_VER)，使用默认版本 22"
-                LLVM_VER=22
-              fi
-            fi
-            
-            echo "📦 正在安装 LLVM $LLVM_VER (来源: $LLVM_TAG)..."
-            
-            wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-            chmod +x /tmp/llvm.sh
-            sudo bash /tmp/llvm.sh "$LLVM_VER" all
-            
-            sudo apt-get install -y \
-              clang-"$LLVM_VER" \
-              lld-"$LLVM_VER" \
-              llvm-"$LLVM_VER" \
-              clang-tools-"$LLVM_VER" \
-              clangd-"$LLVM_VER"
-            
-            echo "COMPILER_NAME=LLVM ${LLVM_VER}" >> "$GITHUB_ENV"
-            echo "CACHE_KEY_COMPILER=llvm-${LLVM_VER}" >> "$GITHUB_ENV"
-            echo "MAKE_ARGS=LLVM=-${LLVM_VER} LLVM_IAS=-${LLVM_VER}" >> "$GITHUB_ENV"
-            
-            echo "info=LLVM ${LLVM_VER}" >> "$GITHUB_OUTPUT"
-            echo "✅ LLVM $LLVM_VER 配置完成"
+            echo "✅ GCC-14 就绪"
             
           else
-            echo "::error::未知编译器选项: $COMPILER"
-            exit 1
+            TAG=$(curl -sL -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/llvm/llvm-project/releases/latest" | jq -r '.tag_name')
+            
+            [[ -z "$TAG" || "$TAG" == "null" ]] && VER=22 || VER=$(echo "$TAG" | sed -E 's/llvmorg-//;s/-.*//;s/\.[0-9]+$//;s/\.[0-9]+$//')
+            [[ ! "$VER" =~ ^[0-9]+$ ]] && VER=22
+            
+            wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+            chmod +x /tmp/llvm.sh && sudo bash /tmp/llvm.sh "$VER" all
+            sudo apt-get install -y clang-"$VER" lld-"$VER" llvm-"$VER"
+            
+            echo "COMPILER_NAME=LLVM ${VER}" >> "$GITHUB_ENV"
+            echo "CACHE_KEY_COMPILER=llvm-${VER}" >> "$GITHUB_ENV"
+            echo "MAKE_ARGS=LLVM=-${VER} LLVM_IAS=-${VER}" >> "$GITHUB_ENV"
+            echo "info=LLVM ${VER}" >> "$GITHUB_OUTPUT"
+            echo "✅ LLVM $VER 就绪"
           fi
 
-      # -----------------------------------------------------------------------
-      # 步骤 7: ccache 配置
-      # -----------------------------------------------------------------------
-      - name: ⚡ 配置 ccache 缓存
+      - name: ⚡ ccache
         run: |
           mkdir -p "$CCACHE_DIR"
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
-          
-          ccache --set-config=max_size="$CCACHE_MAXSIZE"
-          ccache --set-config=compression=true
+          ccache --set-config=max_size="$CCACHE_MAXSIZE" --set-config=compression=true
           ccache --set-config=sloppiness=include_file_mtime,time_macros
-          ccache --zero-stats
-          
-          echo "📊 ccache 统计:"
           ccache -s
 
-      # -----------------------------------------------------------------------
-      # 步骤 8: 恢复 ccache 缓存
-      # -----------------------------------------------------------------------
-      - name: ♻️ 恢复编译缓存
+      - name: ♻️ 恢复缓存
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.CCACHE_DIR }}
           key: kernel-${{ env.KERNEL_VERSION }}-${{ env.CACHE_KEY_COMPILER }}-x86_64-${{ github.run_id }}
           restore-keys: |
             kernel-${{ env.KERNEL_VERSION }}-${{ env.CACHE_KEY_COMPILER }}-x86_64-
-            kernel-${{ env.KERNEL_VERSION }}-${{ env.CACHE_KEY_COMPILER }}-
             kernel-${{ env.KERNEL_VERSION }}-
 
-      # -----------------------------------------------------------------------
-      # 步骤 9: 下载 Linux 内核源码
-      # -----------------------------------------------------------------------
-      - name: 📥 克隆内核源码
+      - name: 📥 克隆源码
         run: |
           set -euo pipefail
-          
           mkdir -p kernel
           BRANCH="${{ inputs.kernel_branch }}"
-          VERSION="${{ env.KERNEL_VERSION }}"
+          VER="${{ env.KERNEL_VERSION }}"
           
-          if [[ "$BRANCH" == "mainline" ]]; then
-            REPO="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git"
-            echo "🌿 使用主线仓库 (torvalds/linux)"
-          else
-            REPO="https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
-            echo "🌿 使用稳定版仓库 (stable/linux)"
-          fi
+          [[ "$BRANCH" == "mainline" ]] && REPO="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git" \
+            || REPO="https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
           
-          echo "📦 正在克隆 Linux $VERSION (标签: v$VERSION)..."
-          
-          git clone --depth=1 -b "v$VERSION" "$REPO" kernel/linux
-          
-          cd kernel/linux
-          ACTUAL_VER=$(make kernelversion 2>/dev/null || echo "未知")
-          echo "✅ 源码就绪，Makefile 报告版本: $ACTUAL_VER"
+          git clone --depth=1 -b "v$VER" "$REPO" kernel/linux
+          cd kernel/linux && echo "✅ 源码: $(make kernelversion 2>/dev/null)"
 
-      # -----------------------------------------------------------------------
-      # 步骤 10: 内核配置生成 (.config)
-      # -----------------------------------------------------------------------
-      - name: ⚙️ 生成内核配置
+      - name: ⚙️ 内核配置
         working-directory: kernel/linux
         run: |
           set -euo pipefail
           
-          echo "🔧 正在生成内核配置..."
-          
           if [[ -f "${{ github.workspace }}/kernel.config" ]]; then
-            echo "📄 使用用户提供的 kernel.config 作为基础"
             cp "${{ github.workspace }}/kernel.config" .config
           else
-            echo "📄 使用 x86_64 默认配置 (defconfig)"
             make ARCH=x86_64 defconfig
           fi
           
-          echo "🛡️ 应用兼容性补丁..."
+          # 兼容性修复
           scripts/config --disable SYSTEM_TRUSTED_KEYS
           scripts/config --disable SYSTEM_REVOCATION_KEYS
           scripts/config --disable DEBUG_INFO_BTF
           
-          apply_config() {
-            local file="$1"
-            local mode="$2"
-            
+          apply() {
+            local file="$1" mode="$2"
             [[ ! -f "$file" ]] && return
-            
-            echo "📋 应用配置 ($mode): $(basename "$file")"
             local count=0
-            
             while IFS= read -r line || [[ -n "$line" ]]; do
               [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-              
-              local config_name=""
-              if [[ "$line" =~ ^CONFIG_[A-Za-z0-9_]+ ]]; then
-                config_name=$(echo "$line" | grep -oE '^CONFIG_[A-Za-z0-9_]+')
-              else
-                continue
-              fi
-              
-              [[ -z "$config_name" ]] && continue
-              
+              local cfg=$(echo "$line" | grep -oE '^CONFIG_[A-Za-z0-9_]+')
+              [[ -z "$cfg" ]] && continue
               case "$mode" in
-                enable)  scripts/config --enable "$config_name" && ((count++)) ;;
-                disable) scripts/config --disable "$config_name" && ((count++)) ;;
-                module)  scripts/config --module "$config_name" && ((count++)) ;;
+                enable)  scripts/config --enable "$cfg" && ((count++)) ;;
+                disable) scripts/config --disable "$cfg" && ((count++)) ;;
+                module)  scripts/config --module "$cfg" && ((count++)) ;;
               esac
             done < "$file"
-            
-            echo "   └─ 已应用 $count 项配置"
+            echo "   └─ $count 项"
           }
           
-          apply_config "${{ github.workspace }}/disabled_kernel_configs.txt" "disable"
-          apply_config "${{ github.workspace }}/moduled_kernel_configs.txt" "module"
-          apply_config "${{ github.workspace }}/enabled_kernel_configs.txt" "enable"
+          apply "${{ github.workspace }}/disabled_kernel_configs.txt" "disable"
+          apply "${{ github.workspace }}/moduled_kernel_configs.txt" "module"
+          apply "${{ github.workspace }}/enabled_kernel_configs.txt" "enable"
           
-          echo "🔄 解析配置依赖关系..."
-          CONFIG_OUTPUT=$(make ARCH=x86_64 olddefconfig ${{ env.MAKE_ARGS }} 2>&1) || {
-            echo "$CONFIG_OUTPUT"
-            exit 1
-          }
-          echo "$CONFIG_OUTPUT" | (head -20 || true)
+          # 生成配置（修复：避免 local 在函数外使用）
+          echo "🔄 解析依赖..."
+          OUT=$(make ARCH=x86_64 olddefconfig ${{ env.MAKE_ARGS }} 2>&1) || { echo "$OUT"; exit 1; }
+          echo "$OUT" | (head -20 || true)
           
-          mkdir -p ../configs
-          cp .config ../configs/final.config
-          echo "💾 最终配置已保存至 kernel/configs/final.config"
+          mkdir -p ../configs && cp .config ../configs/final.config
           
+          # 配置摘要（修复：移除 local，改用常规变量）
           echo "📊 配置摘要:"
-          local total enabled modules
           total=$(grep -c "^CONFIG_" .config 2>/dev/null || echo "0")
           enabled=$(grep -c "=y" .config 2>/dev/null || echo "0")
           modules=$(grep -c "=m" .config 2>/dev/null || echo "0")
-          echo "   总配置项: $total, 内置: $enabled, 模块: $modules"
+          echo "  总计: $total, 内置: $enabled, 模块: $modules"
 
-      # -----------------------------------------------------------------------
-      # 步骤 11: 编译内核
-      # -----------------------------------------------------------------------
-      - name: 🚀 编译内核
+      - name: 🚀 编译
         working-directory: kernel/linux
         timeout-minutes: 340
         env:
@@ -457,92 +291,55 @@ jobs:
           BUILD_CXX: ${{ env.CXX }}
         run: |
           set -eo pipefail
-          
-          echo "🧹 清理旧编译产物..."
           make clean 2>/dev/null || true
           
-          if [[ -n "$BUILD_CC" ]]; then
-            CC_COMPILER="$BUILD_CC"
-          else
-            CC_COMPILER="gcc"
-          fi
+          # 设置编译器（避免 ${:-} 语法）
+          [[ -n "$BUILD_CC" ]] && CC_VAL="$BUILD_CC" || CC_VAL="gcc"
+          [[ -n "$BUILD_CXX" ]] && CXX_VAL="$BUILD_CXX" || CXX_VAL="g++"
           
-          if [[ -n "$BUILD_CXX" ]]; then
-            CXX_COMPILER="$BUILD_CXX"
-          else
-            CXX_COMPILER="g++"
-          fi
+          echo "🔨 编译: ${{ env.KERNEL_VERSION }} | ${{ env.COMPILER_NAME }} | 后缀: ${{ env.CACHE_KEY_COMPILER }}-${{ env.RAND_SUFFIX }}"
           
-          echo "🔨 开始编译:"
-          echo "   版本: Linux ${{ env.KERNEL_VERSION }}"
-          echo "   编译器: ${{ env.COMPILER_NAME }}"
-          echo "   并行任务: $(nproc) 线程"
-          echo "   本地版本后缀: -${{ env.CACHE_KEY_COMPILER }}-${{ env.RAND_SUFFIX }}"
-          echo "   使用编译器: CC=$CC_COMPILER, CXX=$CXX_COMPILER"
-          
-          if ! make ARCH=x86_64 bindeb-pkg \
-            -j$(nproc) \
+          if ! make ARCH=x86_64 bindeb-pkg -j$(nproc) \
             LOCALVERSION="-${{ env.CACHE_KEY_COMPILER }}-${{ env.RAND_SUFFIX }}" \
             ${{ env.MAKE_ARGS }} \
-            CC="$CC_COMPILER" \
-            CXX="$CXX_COMPILER" \
+            CC="$CC_VAL" CXX="$CXX_VAL" \
             2>&1 | tee ../build.log; then
             
-            echo "::error::❌ 编译失败！"
-            echo "📄 错误日志（最后 200 行）："
-            tail -n 200 ../build.log 2>/dev/null || cat ../build.log 2>/dev/null || echo "无法读取日志"
+            echo "::error::编译失败"
+            tail -n 200 ../build.log 2>/dev/null || cat ../build.log 2>/dev/null || echo "无日志"
             exit 1
           fi
           
-          echo "✅ 编译成功！"
-          ls -lh ../*.deb 2>/dev/null || echo "::warning::未找到生成的 deb 包"
+          echo "✅ 编译完成"
+          ls -lh ../*.deb
 
-      # -----------------------------------------------------------------------
-      # 步骤 12: 保存 ccache 缓存
-      # -----------------------------------------------------------------------
-      - name: 💾 保存编译缓存
+      - name: 💾 保存缓存
         uses: actions/cache/save@v4
         with:
           path: ${{ env.CCACHE_DIR }}
           key: kernel-${{ env.KERNEL_VERSION }}-${{ env.CACHE_KEY_COMPILER }}-x86_64-${{ github.run_id }}
 
-      # -----------------------------------------------------------------------
-      # 步骤 13: 产物校验与元数据生成
-      # -----------------------------------------------------------------------
-      - name: 🛡️ 校验构建产物
+      - name: 🛡️ 校验
         working-directory: kernel
         run: |
           set -euo pipefail
+          ls *.deb >/dev/null 2>&1 || { echo "::error::无 deb 包"; exit 1; }
           
-          echo "🔍 检查构建产物..."
-          
-          if ! ls *.deb >/dev/null 2>&1; then
-            echo "::error::未找到任何 .deb 构建产物！"
-            ls -la
-            exit 1
-          fi
-          
-          echo "📋 生成校验和..."
           sha256sum *.deb > checksums.txt
-          
           {
             echo "BUILD_DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")"
             echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
             echo "COMPILER=${{ env.COMPILER_NAME }}"
             echo "BRANCH=${{ inputs.kernel_branch }}"
             echo "BUILD_ID=${{ env.RAND_SUFFIX }}"
-            echo "CCACHE_SIZE=$(ccache -s | grep 'cache size' | awk '{print $3}')"
           } > build-metadata.txt
           
-          echo "✅ 产物校验完成:"
+          echo "✅ 校验完成:"
           while IFS= read -r line || [[ -n "$line" ]]; do
-            echo "   ✓ $line"
+            echo "  ✓ $line"
           done < checksums.txt
 
-      # -----------------------------------------------------------------------
-      # 步骤 14: 上传构建产物到 Artifacts
-      # -----------------------------------------------------------------------
-      - name: 📤 上传 Artifacts
+      - name: 📤 上传
         uses: actions/upload-artifact@v4
         with:
           name: linux-${{ env.KERNEL_VERSION }}-${{ env.CACHE_KEY_COMPILER }}-amd64-${{ env.RAND_SUFFIX }}
@@ -553,13 +350,9 @@ jobs:
             kernel/checksums.txt
             kernel/build-metadata.txt
           retention-days: 7
-          compression-level: 6
           if-no-files-found: error
 
-      # -----------------------------------------------------------------------
-      # 步骤 15: 发布 GitHub Release
-      # -----------------------------------------------------------------------
-      - name: 🎉 发布 Release
+      - name: 🎉 Release
         if: success()
         uses: softprops/action-gh-release@v2
         with:
@@ -571,37 +364,18 @@ jobs:
             kernel/checksums.txt
             kernel/build-metadata.txt
           body: |
-            ## 🐧 Linux Kernel ${{ env.KERNEL_VERSION }} 构建完成
+            ## Linux ${{ env.KERNEL_VERSION }}
             
             | 属性 | 值 |
             |------|-----|
             | **架构** | x86_64 (amd64) |
-            | **源码分支** | `${{ inputs.kernel_branch }}` |
+            | **分支** | `${{ inputs.kernel_branch }}` |
             | **编译器** | ${{ env.COMPILER_NAME }} |
-            | **构建标识** | `${{ env.RAND_SUFFIX }}` |
-            | **构建时间** | ${{ github.event.repository.updated_at }} |
+            | **构建ID** | `${{ env.RAND_SUFFIX }}` |
             
-            ### 📦 安装指南
-            
+            ### 安装
             ```bash
-            # 1. 下载 deb 包和校验文件
-            # 2. 验证文件完整性
             sha256sum -c checksums.txt
-            
-            # 3. 安装内核及头文件（必须同时安装）
             sudo dpkg -i linux-image-*.deb linux-headers-*.deb
-            
-            # 4. 更新引导加载器
-            sudo update-grub2
-            
-            # 5. 重启系统
-            sudo reboot
+            sudo update-grub2 && sudo reboot
             ```
-            
-            ### 📝 构建信息
-            
-            - 基于 Git 标签: `v${{ env.KERNEL_VERSION }}`
-            - 配置文件: 参见 `final.config` (Artifacts 中下载)
-            - 完整构建日志: 参见 `build.log`
-          generate_release_notes: false
-          fail_on_unmatched_files: true
