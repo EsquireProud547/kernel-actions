@@ -1,6 +1,9 @@
 # =============================================================================
-# Linux 内核自动化构建系统 (x86_64) v2.4
-# 支持: Mainline/Stable/LTS | GCC-14/LLVM | x86_64
+# Linux 内核自动化构建系统 (x86_64)
+# 版本：2.3
+# 功能：自动化编译 x86_64 架构 Linux 内核，生成 .deb 安装包
+# 支持：主线 / 稳定版 / LTS 分支
+# 编译器：GCC-14 / LLVM (自动获取最新稳定版)
 # =============================================================================
 
 name: 🐧 Linux 内核构建 (x86_64)
@@ -9,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       compiler:
-        description: '编译器'
+        description: '🛠️ 编译器选择'
         required: true
         default: 'gcc-default'
         type: choice
@@ -18,7 +21,7 @@ on:
           - llvm-latest
       
       kernel_branch:
-        description: '分支'
+        description: '🌿 内核源码分支'
         required: true
         default: 'stable'
         type: choice
@@ -32,31 +35,31 @@ on:
           - longterm-5.10
       
       disable_unused_configs:
-        description: '禁用配置'
+        description: '❌ 禁用配置 (disabled_kernel_configs.txt)'
         required: true
         default: false
         type: boolean
       
       enable_custom_configs:
-        description: '启用配置'
+        description: '✅ 启用配置 (enabled_kernel_configs.txt)'
         required: true
         default: false
         type: boolean
       
       enable_module_configs:
-        description: '模块配置'
+        description: '🧩 模块配置 (moduled_kernel_configs.txt)'
         required: true
         default: false
         type: boolean
       
       cleanup_history:
-        description: '清理历史'
+        description: '🧹 清理历史工作流记录'
         required: true
         default: false
         type: boolean
       
       cleanup_only:
-        description: '仅清理'
+        description: '⚠️ 仅执行清理 (跳过构建)'
         required: true
         default: false
         type: boolean
@@ -69,19 +72,21 @@ env:
 
 jobs:
   cleanup:
-    name: 🧹 清理
+    name: 🧹 清理历史记录
     if: ${{ inputs.cleanup_history || inputs.cleanup_only }}
     runs-on: ubuntu-latest
     permissions:
       actions: write
+      contents: read
     steps:
-      - uses: Mattraks/delete-workflow-runs@main
+      - name: 删除旧工作流运行记录
+        uses: Mattraks/delete-workflow-runs@main
         with:
           retain_days: 0
           keep_minimum_runs: 1
 
   build:
-    name: 🔨 编译
+    name: 🔨 编译内核 (${{ inputs.kernel_branch }})
     needs: cleanup
     if: ${{ always() && !inputs.cleanup_only && (needs.cleanup.result == 'success' || needs.cleanup.result == 'skipped') }}
     runs-on: ubuntu-latest
@@ -90,74 +95,89 @@ jobs:
       contents: write
     
     outputs:
-      kernel_version: ${{ steps.version.outputs.version }}
-      compiler_info: ${{ steps.compiler.outputs.info }}
+      kernel_version: ${{ steps.kernel-version.outputs.version }}
+      compiler_info: ${{ steps.compiler-setup.outputs.info }}
     
     steps:
-      - uses: actions/checkout@v4
+      - name: 📥 检出仓库代码
+        uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: 🔍 环境校验
+      - name: 🔍 参数与环境校验
         run: |
           set -euo pipefail
           
           check_file() {
-            [[ "$1" == "true" && ! -f "$2" ]] && { echo "::error::缺少配置: $2"; exit 1; }
+            local enabled="$1"
+            local filepath="$2"
+            [[ "$enabled" == "true" && ! -f "$filepath" ]] && { echo "::error::缺少配置文件: $filepath"; exit 1; }
           }
           
           check_file "${{ inputs.disable_unused_configs }}" "disabled_kernel_configs.txt"
           check_file "${{ inputs.enable_custom_configs }}" "enabled_kernel_configs.txt"
           check_file "${{ inputs.enable_module_configs }}" "moduled_kernel_configs.txt"
           
-          # 生成随机后缀（避免 tr|head broken pipe）
           RAND_SUFFIX=$(openssl rand -hex 4 2>/dev/null || echo "00000000")
           echo "RAND_SUFFIX=$RAND_SUFFIX" >> "$GITHUB_ENV"
-          echo "✅ 构建标识: $RAND_SUFFIX"
+          echo "✅ 环境校验通过，构建标识: $RAND_SUFFIX"
 
-      - name: 🌐 获取版本
-        id: version
+      - name: 🌐 获取内核版本号
+        id: kernel-version
         run: |
           set -euo pipefail
           
           BRANCH="${{ inputs.kernel_branch }}"
-          API="https://www.kernel.org/releases.json"
+          API_URL="https://www.kernel.org/releases.json"
+          
+          echo "📡 正在获取分支 [$BRANCH] 的最新版本..."
           
           for i in {1..3}; do
-            JSON=$(curl -fsSL --retry 3 "$API") && break
+            RELEASES_JSON=$(curl -fsSL --retry 3 --retry-delay 2 "$API_URL") && break
+            echo "⚠️ 第 $i 次尝试失败，等待重试..."
             sleep 5
           done
           
-          [[ -z "${JSON:-}" ]] && { echo "::error::无法连接 kernel.org"; exit 1; }
+          [[ -z "${RELEASES_JSON:-}" ]] && { echo "::error::无法连接到 kernel.org"; exit 1; }
           
           case "$BRANCH" in
-            mainline)  VER=$(echo "$JSON" | jq -r '[.releases[]|select(.moniker=="mainline")]|first|.version') ;;
-            stable)    VER=$(echo "$JSON" | jq -r '.latest_stable.version') ;;
-            longterm-*) 
-              BASE="${BRANCH#longterm-}"
-              VER=$(echo "$JSON" | jq -r '[.releases[]|select(.moniker=="longterm" and (.version|startswith("'"$BASE"'")))]|first|.version')
+            mainline)
+              VERSION=$(echo "$RELEASES_JSON" | jq -r '[.releases[] | select(.moniker=="mainline")] | first | .version')
               ;;
-            *) echo "::error::未知分支: $BRANCH"; exit 1 ;;
+            stable)
+              VERSION=$(echo "$RELEASES_JSON" | jq -r '.latest_stable.version')
+              ;;
+            longterm-*)
+              BASE_VER="${BRANCH#longterm-}"
+              VERSION=$(echo "$RELEASES_JSON" | jq -r '[.releases[] | select(.moniker=="longterm" and (.version | startswith("'"$BASE_VER"'")))] | first | .version')
+              ;;
+            *)
+              echo "::error::未知的分支类型: $BRANCH"
+              exit 1
+              ;;
           esac
           
-          [[ -z "$VER" || "$VER" == "null" ]] && { echo "::error::无法获取版本"; exit 1; }
+          [[ -z "$VERSION" || "$VERSION" == "null" ]] && { echo "::error::无法解析版本号"; exit 1; }
           
-          # 支持 7.0-rc5 等格式
-          [[ ! "$VER" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?(-[a-zA-Z0-9\.\-]+)?$ ]] && {
-            echo "::error::版本格式异常: $VER"; exit 1
+          # 支持 -rcX, -next, -git 等后缀
+          [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?(-[a-zA-Z0-9\.\-]+)?$ ]] && { 
+            echo "::error::版本号格式异常: $VERSION"; 
+            exit 1; 
           }
           
-          echo "KERNEL_VERSION=$VER" >> "$GITHUB_ENV"
-          echo "version=$VER" >> "$GITHUB_OUTPUT"
-          echo "✅ 目标版本: Linux $VER"
+          echo "KERNEL_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "✅ 目标版本: Linux $VERSION"
 
-      - name: 🧹 清理空间
+      - name: 🧹 清理磁盘空间
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/hostedtoolcache /usr/local/{lib/android,graalvm,share/boost} "$AGENT_TOOLSDIRECTORY"
+          echo "🗑️ 清理磁盘空间..."
+          sudo rm -rf /usr/share/dotnet /opt/hostedtoolcache /usr/local/lib/android \
+                     /usr/local/graalvm /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
           sudo apt-get clean && sudo apt-get autoremove -y
           df -h /
 
-      - name: 📦 安装依赖
+      - name: 📦 安装构建依赖
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
@@ -166,15 +186,17 @@ jobs:
             lz4 zstd xz-utils curl jq openssl initramfs-tools libdw-dev \
             software-properties-common wget ca-certificates gnupg lsb-release
 
-      - name: 🛠️ 配置编译器
-        id: compiler
+      - name: 🛠️ 配置编译器环境
+        id: compiler-setup
         run: |
           set -euo pipefail
-          COMP="${{ inputs.compiler }}"
+          COMPILER="${{ inputs.compiler }}"
           
-          if [[ "$COMP" == "gcc-default" ]]; then
+          if [[ "$COMPILER" == "gcc-default" ]]; then
+            echo "🔧 配置 GCC-14 环境..."
             sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
-            sudo apt-get update -qq && sudo apt-get install -y gcc-14 g++-14
+            sudo apt-get update -qq
+            sudo apt-get install -y gcc-14 g++-14
             
             echo "CC=gcc-14" >> "$GITHUB_ENV"
             echo "CXX=g++-14" >> "$GITHUB_ENV"
@@ -182,108 +204,140 @@ jobs:
             echo "CACHE_KEY_COMPILER=gcc-14" >> "$GITHUB_ENV"
             echo "MAKE_ARGS=" >> "$GITHUB_ENV"
             echo "info=GCC 14" >> "$GITHUB_OUTPUT"
-            echo "✅ GCC-14 就绪"
+            echo "✅ GCC-14 配置完成"
             
-          else
-            TAG=$(curl -sL -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/llvm/llvm-project/releases/latest" | jq -r '.tag_name')
+          elif [[ "$COMPILER" == "llvm-latest" ]]; then
+            echo "🔧 探测最新 LLVM/Clang..."
             
-            [[ -z "$TAG" || "$TAG" == "null" ]] && VER=22 || VER=$(echo "$TAG" | sed -E 's/llvmorg-//;s/-.*//;s/\.[0-9]+$//;s/\.[0-9]+$//')
-            [[ ! "$VER" =~ ^[0-9]+$ ]] && VER=22
+            LLVM_TAG=$(curl -sL \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/llvm/llvm-project/releases/latest" | \
+              jq -r '.tag_name')
+            
+            if [[ -z "$LLVM_TAG" || "$LLVM_TAG" == "null" ]]; then
+              echo "::warning::GitHub API 获取失败，使用备用版本 22"
+              LLVM_VER=22
+            else
+              LLVM_VER=$(echo "$LLVM_TAG" | sed -E 's/llvmorg-//;s/-.*//;s/\.[0-9]+$//;s/\.[0-9]+$//')
+              [[ ! "$LLVM_VER" =~ ^[0-9]+$ ]] && { echo "::warning::解析失败，使用默认版本 22"; LLVM_VER=22; }
+            fi
+            
+            echo "📦 安装 LLVM $LLVM_VER (来源: $LLVM_TAG)..."
             
             wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-            chmod +x /tmp/llvm.sh && sudo bash /tmp/llvm.sh "$VER" all
-            sudo apt-get install -y clang-"$VER" lld-"$VER" llvm-"$VER"
+            chmod +x /tmp/llvm.sh
+            sudo bash /tmp/llvm.sh "$LLVM_VER" all
             
-            echo "COMPILER_NAME=LLVM ${VER}" >> "$GITHUB_ENV"
-            echo "CACHE_KEY_COMPILER=llvm-${VER}" >> "$GITHUB_ENV"
-            echo "MAKE_ARGS=LLVM=-${VER} LLVM_IAS=-${VER}" >> "$GITHUB_ENV"
-            echo "info=LLVM ${VER}" >> "$GITHUB_OUTPUT"
-            echo "✅ LLVM $VER 就绪"
+            sudo apt-get install -y \
+              clang-"$LLVM_VER" lld-"$LLVM_VER" llvm-"$LLVM_VER" \
+              clang-tools-"$LLVM_VER" clangd-"$LLVM_VER"
+            
+            echo "COMPILER_NAME=LLVM ${LLVM_VER}" >> "$GITHUB_ENV"
+            echo "CACHE_KEY_COMPILER=llvm-${LLVM_VER}" >> "$GITHUB_ENV"
+            echo "MAKE_ARGS=LLVM=-${LLVM_VER} LLVM_IAS=-${LLVM_VER}" >> "$GITHUB_ENV"
+            echo "info=LLVM ${LLVM_VER}" >> "$GITHUB_OUTPUT"
+            echo "✅ LLVM $LLVM_VER 配置完成"
+            
+          else
+            echo "::error::未知编译器选项: $COMPILER"
+            exit 1
           fi
 
-      - name: ⚡ ccache
+      - name: ⚡ 配置 ccache 缓存
         run: |
           mkdir -p "$CCACHE_DIR"
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
-          ccache --set-config=max_size="$CCACHE_MAXSIZE" --set-config=compression=true
+          
+          ccache --set-config=max_size="$CCACHE_MAXSIZE"
+          ccache --set-config=compression=true
           ccache --set-config=sloppiness=include_file_mtime,time_macros
+          ccache --zero-stats
           ccache -s
 
-      - name: ♻️ 恢复缓存
+      - name: ♻️ 恢复编译缓存
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.CCACHE_DIR }}
           key: kernel-${{ env.KERNEL_VERSION }}-${{ env.CACHE_KEY_COMPILER }}-x86_64-${{ github.run_id }}
           restore-keys: |
             kernel-${{ env.KERNEL_VERSION }}-${{ env.CACHE_KEY_COMPILER }}-x86_64-
+            kernel-${{ env.KERNEL_VERSION }}-${{ env.CACHE_KEY_COMPILER }}-
             kernel-${{ env.KERNEL_VERSION }}-
 
-      - name: 📥 克隆源码
+      - name: 📥 克隆内核源码
         run: |
           set -euo pipefail
           mkdir -p kernel
           BRANCH="${{ inputs.kernel_branch }}"
-          VER="${{ env.KERNEL_VERSION }}"
+          VERSION="${{ env.KERNEL_VERSION }}"
           
           [[ "$BRANCH" == "mainline" ]] && REPO="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git" \
-            || REPO="https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
+                                         || REPO="https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
           
-          git clone --depth=1 -b "v$VER" "$REPO" kernel/linux
-          cd kernel/linux && echo "✅ 源码: $(make kernelversion 2>/dev/null)"
+          echo "📦 克隆 Linux $VERSION ..."
+          git clone --depth=1 -b "v$VERSION" "$REPO" kernel/linux
+          
+          cd kernel/linux
+          ACTUAL_VER=$(make kernelversion 2>/dev/null || echo "未知")
+          echo "✅ 源码就绪，Makefile 版本: $ACTUAL_VER"
 
-      - name: ⚙️ 内核配置
+      - name: ⚙️ 生成内核配置
         working-directory: kernel/linux
         run: |
           set -euo pipefail
           
+          echo "🔧 生成内核配置..."
+          
           if [[ -f "${{ github.workspace }}/kernel.config" ]]; then
             cp "${{ github.workspace }}/kernel.config" .config
+            echo "📄 使用用户提供的 kernel.config"
           else
             make ARCH=x86_64 defconfig
+            echo "📄 使用 x86_64 默认配置"
           fi
           
-          # 兼容性修复
+          echo "🛡️ 应用兼容性补丁..."
           scripts/config --disable SYSTEM_TRUSTED_KEYS
           scripts/config --disable SYSTEM_REVOCATION_KEYS
           scripts/config --disable DEBUG_INFO_BTF
           
-          apply() {
+          apply_config() {
             local file="$1" mode="$2"
             [[ ! -f "$file" ]] && return
+            echo "📋 应用配置 ($mode): $(basename "$file")"
             local count=0
             while IFS= read -r line || [[ -n "$line" ]]; do
               [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-              local cfg=$(echo "$line" | grep -oE '^CONFIG_[A-Za-z0-9_]+')
-              [[ -z "$cfg" ]] && continue
+              local config_name=$(echo "$line" | grep -oE '^CONFIG_[A-Za-z0-9_]+' || true)
+              [[ -z "$config_name" ]] && continue
               case "$mode" in
-                enable)  scripts/config --enable "$cfg" && ((count++)) ;;
-                disable) scripts/config --disable "$cfg" && ((count++)) ;;
-                module)  scripts/config --module "$cfg" && ((count++)) ;;
+                enable)  scripts/config --enable "$config_name" && ((count++)) ;;
+                disable) scripts/config --disable "$config_name" && ((count++)) ;;
+                module)  scripts/config --module "$config_name" && ((count++)) ;;
               esac
             done < "$file"
-            echo "   └─ $count 项"
+            echo "   └─ 已应用 $count 项配置"
           }
           
-          apply "${{ github.workspace }}/disabled_kernel_configs.txt" "disable"
-          apply "${{ github.workspace }}/moduled_kernel_configs.txt" "module"
-          apply "${{ github.workspace }}/enabled_kernel_configs.txt" "enable"
+          apply_config "${{ github.workspace }}/disabled_kernel_configs.txt" "disable"
+          apply_config "${{ github.workspace }}/moduled_kernel_configs.txt" "module"
+          apply_config "${{ github.workspace }}/enabled_kernel_configs.txt" "enable"
           
-          # 生成配置（修复：避免 local 在函数外使用）
-          echo "🔄 解析依赖..."
-          OUT=$(make ARCH=x86_64 olddefconfig ${{ env.MAKE_ARGS }} 2>&1) || { echo "$OUT"; exit 1; }
-          echo "$OUT" | (head -20 || true)
+          echo "🔄 解析配置依赖关系..."
+          make ARCH=x86_64 olddefconfig ${{ env.MAKE_ARGS }} 2>&1 | head -20
           
-          mkdir -p ../configs && cp .config ../configs/final.config
+          mkdir -p ../configs
+          cp .config ../configs/final.config
+          echo "💾 最终配置已保存"
           
-          # 配置摘要（修复：移除 local，改用常规变量）
           echo "📊 配置摘要:"
           total=$(grep -c "^CONFIG_" .config 2>/dev/null || echo "0")
           enabled=$(grep -c "=y" .config 2>/dev/null || echo "0")
           modules=$(grep -c "=m" .config 2>/dev/null || echo "0")
-          echo "  总计: $total, 内置: $enabled, 模块: $modules"
+          echo "   总配置项: $total, 内置: $enabled, 模块: $modules"
 
-      - name: 🚀 编译
+      - name: 🚀 编译内核
         working-directory: kernel/linux
         timeout-minutes: 340
         env:
@@ -291,55 +345,66 @@ jobs:
           BUILD_CXX: ${{ env.CXX }}
         run: |
           set -eo pipefail
+          
+          echo "🧹 清理旧编译产物..."
           make clean 2>/dev/null || true
           
-          # 设置编译器（避免 ${:-} 语法）
-          [[ -n "$BUILD_CC" ]] && CC_VAL="$BUILD_CC" || CC_VAL="gcc"
-          [[ -n "$BUILD_CXX" ]] && CXX_VAL="$BUILD_CXX" || CXX_VAL="g++"
+          CC_COMPILER="${BUILD_CC:-gcc}"
+          CXX_COMPILER="${BUILD_CXX:-g++}"
           
-          echo "🔨 编译: ${{ env.KERNEL_VERSION }} | ${{ env.COMPILER_NAME }} | 后缀: ${{ env.CACHE_KEY_COMPILER }}-${{ env.RAND_SUFFIX }}"
+          echo "🔨 开始编译:"
+          echo "   版本: Linux ${{ env.KERNEL_VERSION }}"
+          echo "   编译器: ${{ env.COMPILER_NAME }}"
+          echo "   并行任务: $(nproc) 线程"
+          echo "   本地版本后缀: -${{ env.CACHE_KEY_COMPILER }}-${{ env.RAND_SUFFIX }}"
           
-          if ! make ARCH=x86_64 bindeb-pkg -j$(nproc) \
+          if ! make ARCH=x86_64 bindeb-pkg \
+            -j$(nproc) \
             LOCALVERSION="-${{ env.CACHE_KEY_COMPILER }}-${{ env.RAND_SUFFIX }}" \
             ${{ env.MAKE_ARGS }} \
-            CC="$CC_VAL" CXX="$CXX_VAL" \
+            CC="$CC_COMPILER" \
+            CXX="$CXX_COMPILER" \
             2>&1 | tee ../build.log; then
             
-            echo "::error::编译失败"
-            tail -n 200 ../build.log 2>/dev/null || cat ../build.log 2>/dev/null || echo "无日志"
+            echo "::error::❌ 编译失败！"
+            echo "📄 错误日志（最后 200 行）："
+            tail -n 200 ../build.log 2>/dev/null || cat ../build.log 2>/dev/null || echo "无法读取日志"
             exit 1
           fi
           
-          echo "✅ 编译完成"
-          ls -lh ../*.deb
+          echo "✅ 编译成功！"
+          ls -lh ../*.deb 2>/dev/null || echo "::warning::未找到生成的 deb 包"
 
-      - name: 💾 保存缓存
+      - name: 💾 保存编译缓存
         uses: actions/cache/save@v4
         with:
           path: ${{ env.CCACHE_DIR }}
           key: kernel-${{ env.KERNEL_VERSION }}-${{ env.CACHE_KEY_COMPILER }}-x86_64-${{ github.run_id }}
 
-      - name: 🛡️ 校验
+      - name: 🛡️ 校验构建产物
         working-directory: kernel
         run: |
           set -euo pipefail
-          ls *.deb >/dev/null 2>&1 || { echo "::error::无 deb 包"; exit 1; }
+          echo "🔍 检查构建产物..."
           
+          ls *.deb >/dev/null 2>&1 || { echo "::error::未找到 .deb 构建产物"; exit 1; }
+          
+          echo "📋 生成校验和..."
           sha256sum *.deb > checksums.txt
+          
           {
             echo "BUILD_DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")"
             echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
             echo "COMPILER=${{ env.COMPILER_NAME }}"
             echo "BRANCH=${{ inputs.kernel_branch }}"
             echo "BUILD_ID=${{ env.RAND_SUFFIX }}"
+            echo "CCACHE_SIZE=$(ccache -s | grep 'cache size' | awk '{print $3}')"
           } > build-metadata.txt
           
-          echo "✅ 校验完成:"
-          while IFS= read -r line || [[ -n "$line" ]]; do
-            echo "  ✓ $line"
-          done < checksums.txt
+          echo "✅ 产物校验完成:"
+          cat checksums.txt | while read -r line; do echo "   ✓ $line"; done
 
-      - name: 📤 上传
+      - name: 📤 上传 Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: linux-${{ env.KERNEL_VERSION }}-${{ env.CACHE_KEY_COMPILER }}-amd64-${{ env.RAND_SUFFIX }}
@@ -350,9 +415,10 @@ jobs:
             kernel/checksums.txt
             kernel/build-metadata.txt
           retention-days: 7
+          compression-level: 6
           if-no-files-found: error
 
-      - name: 🎉 Release
+      - name: 🎉 发布 Release
         if: success()
         uses: softprops/action-gh-release@v2
         with:
@@ -364,18 +430,30 @@ jobs:
             kernel/checksums.txt
             kernel/build-metadata.txt
           body: |
-            ## Linux ${{ env.KERNEL_VERSION }}
+            ## 🐧 Linux Kernel ${{ env.KERNEL_VERSION }} 构建完成
             
             | 属性 | 值 |
             |------|-----|
             | **架构** | x86_64 (amd64) |
-            | **分支** | `${{ inputs.kernel_branch }}` |
+            | **源码分支** | `${{ inputs.kernel_branch }}` |
             | **编译器** | ${{ env.COMPILER_NAME }} |
-            | **构建ID** | `${{ env.RAND_SUFFIX }}` |
+            | **构建标识** | `${{ env.RAND_SUFFIX }}` |
+            | **构建时间** | ${{ github.event.repository.updated_at }} |
             
-            ### 安装
+            ### 📦 安装指南
+            
             ```bash
+            # 1. 验证文件完整性
             sha256sum -c checksums.txt
+            
+            # 2. 安装内核及头文件
             sudo dpkg -i linux-image-*.deb linux-headers-*.deb
-            sudo update-grub2 && sudo reboot
+            
+            # 3. 更新引导加载器
+            sudo update-grub2
+            
+            # 4. 重启系统
+            sudo reboot
             ```
+          generate_release_notes: false
+          fail_on_unmatched_files: true
