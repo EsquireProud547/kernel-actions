@@ -511,30 +511,24 @@ jobs:
           echo "🧹 清理旧编译产物..."
           make clean 2>/dev/null || true
           
-          # 编译参数详情
           echo "🔨 开始编译:"
           echo "   版本: Linux ${{ env.KERNEL_VERSION }}"
           echo "   编译器: ${{ env.COMPILER_NAME }}"
           echo "   并行任务: $(nproc) 线程"
           echo "   本地版本后缀: -${{ env.CACHE_KEY_COMPILER }}-${{ env.RAND_SUFFIX }}"
           
-          # 执行编译，同时生成构建日志
+          # 执行编译
           if ! make ARCH=x86_64 bindeb-pkg \
             -j$(nproc) \
             LOCALVERSION="-${{ env.CACHE_KEY_COMPILER }}-${{ env.RAND_SUFFIX }}" \
             ${{ env.MAKE_ARGS }} \
             CC="${CC:-gcc}" \
             CXX="${CXX:-g++}" \
-            2>&1 | tee ../build.log | tail -n 100; then
-            
-            echo "::error::❌ 编译失败！"
-            echo "📄 错误日志（最后 100 行）:"
-            tail -n 100 ../build.log || true
+            2>&1 | tee ../build.log; then
+            echo "::error::编译失败，查看日志："
+            tail -n 200 ../build.log
             exit 1
           fi
-          
-          echo "✅ 编译成功！"
-          ls -lh ../*.deb 2>/dev/null || echo "::warning::未找到生成的 deb 包"
 
       # -----------------------------------------------------------------------
       # 步骤 12: 保存 ccache 缓存
