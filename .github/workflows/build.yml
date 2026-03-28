@@ -1,6 +1,6 @@
 # =============================================================================
 # 工作流名称：Linux 内核自动化构建系统 (x86_64)
-# 版本：2.2
+# 版本：2.3
 # 核心功能：自动化编译 x86_64 架构 Linux 内核，生成 .deb 安装包
 # 支持分支：主线 (Mainline) / 稳定版 (Stable) / 长期支持版 (LTS)
 # 编译器支持：GCC-14 / LLVM (自动获取最新稳定版)
@@ -69,6 +69,8 @@ env:
   CCACHE_DIR: /home/runner/.ccache
   CCACHE_MAXSIZE: 2G
   ARCH: x86_64
+  # 适配 Node.js 24（解决 Node 20 弃用警告）
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   # ===========================================================================
@@ -114,7 +116,7 @@ jobs:
           fetch-depth: 1
 
       # -----------------------------------------------------------------------
-      # 步骤 2: 参数校验与预处理（修复：移除导致 broken pipe 的 tr|head）
+      # 步骤 2: 参数校验与预处理
       # -----------------------------------------------------------------------
       - name: 🔍 参数与环境校验
         run: |
@@ -135,16 +137,14 @@ jobs:
           check_file "${{ inputs.enable_custom_configs }}" "enabled_kernel_configs.txt"
           check_file "${{ inputs.enable_module_configs }}" "moduled_kernel_configs.txt"
           
-          # 生成 8 位随机后缀（修复：使用 openssl 避免 tr|head broken pipe）
-          # 原代码: RAND_SUFFIX=$(tr -dc 'a-z0-9' < /dev/urandom | head -c8)
-          # 修复: openssl rand -hex 4 生成 8 位十六进制字符，不会触发 broken pipe
+          # 生成 8 位随机后缀（使用 openssl 避免 broken pipe）
           RAND_SUFFIX=$(openssl rand -hex 4 2>/dev/null || echo "00000000")
           
           echo "RAND_SUFFIX=$RAND_SUFFIX" >> "$GITHUB_ENV"
           echo "✅ 环境校验通过，构建标识: $RAND_SUFFIX"
 
       # -----------------------------------------------------------------------
-      # 步骤 3: 获取最新内核版本号 (多重容错机制)
+      # 步骤 3: 获取最新内核版本号（修复：支持 -rcX 等后缀）
       # -----------------------------------------------------------------------
       - name: 🌐 获取内核版本号
         id: kernel-version
@@ -170,7 +170,7 @@ jobs:
             exit 1
           fi
           
-          # 根据分支解析版本号（使用 jq first 替代 head -n1，避免 pipe）
+          # 根据分支解析版本号
           case "$BRANCH" in
             mainline)
               VERSION=$(echo "$RELEASES_JSON" | jq -r '[.releases[] | select(.moniker=="mainline")] | first | .version')
@@ -197,9 +197,15 @@ jobs:
             exit 1
           fi
           
-          # 校验版本号格式 (x.y.z 或 x.y)
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+          # 校验版本号格式（修复：支持 -rcX, -next, -git 等后缀）
+          # 主线版如 7.0-rc5, 6.11-rc1 都应被接受
+          # 正则解释：
+          #   [0-9]+\.[0-9]+            -> 主版本.次版本 (如 6.12, 7.0)
+          #   (\.[0-9]+)?               -> 可选的补丁版本 (如 .8)
+          #   (-[a-zA-Z0-9\.\-]+)?      -> 可选的后缀 (如 -rc5, -next-20241001, -git)
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?(-[a-zA-Z0-9\.\-]+)?$ ]]; then
             echo "::error::获取到的版本号格式异常: $VERSION"
+            echo "::error::期望格式: X.Y, X.Y.Z, X.Y-rcN, X.Y.Z-rcN 等"
             exit 1
           fi
           
@@ -225,7 +231,7 @@ jobs:
           df -h /
 
       # -----------------------------------------------------------------------
-      # 步骤 5: 安装系统依赖（添加 openssl 用于随机数生成）
+      # 步骤 5: 安装系统依赖（添加 openssl）
       # -----------------------------------------------------------------------
       - name: 📦 安装构建依赖
         run: |
@@ -237,7 +243,7 @@ jobs:
             software-properties-common wget ca-certificates gnupg lsb-release
 
       # -----------------------------------------------------------------------
-      # 步骤 6: 编译器配置 (核心修复)
+      # 步骤 6: 编译器配置
       # -----------------------------------------------------------------------
       - name: 🛠️ 配置编译器环境
         id: compiler-setup
@@ -253,7 +259,6 @@ jobs:
             sudo apt-get update -qq
             sudo apt-get install -y gcc-14 g++-14
             
-            # 设置环境变量（显式写入 GITHUB_ENV）
             echo "CC=gcc-14" >> "$GITHUB_ENV"
             echo "CXX=g++-14" >> "$GITHUB_ENV"
             echo "COMPILER_NAME=GCC 14" >> "$GITHUB_ENV"
@@ -266,7 +271,6 @@ jobs:
           elif [[ "$COMPILER" == "llvm-latest" ]]; then
             echo "🔧 探测并安装最新 LLVM/Clang..."
             
-            # 使用 GitHub API 获取最新 LLVM 版本（修复原网页抓取失效问题）
             LLVM_TAG=$(curl -sL \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
@@ -277,10 +281,8 @@ jobs:
               echo "::warning::GitHub API 获取失败，使用备用版本 22"
               LLVM_VER=22
             else
-              # 提取主版本号 (22.1.2 -> 22)
               LLVM_VER=$(echo "$LLVM_TAG" | sed -E 's/llvmorg-//;s/-.*//;s/\.[0-9]+$//;s/\.[0-9]+$//')
               
-              # 校验版本号有效性
               if [[ ! "$LLVM_VER" =~ ^[0-9]+$ ]]; then
                 echo "::warning::解析版本号异常 ($LLVM_TAG -> $LLVM_VER)，使用默认版本 22"
                 LLVM_VER=22
@@ -289,12 +291,10 @@ jobs:
             
             echo "📦 正在安装 LLVM $LLVM_VER (来源: $LLVM_TAG)..."
             
-            # 使用官方 llvm.sh 脚本安装指定版本
             wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
             chmod +x /tmp/llvm.sh
             sudo bash /tmp/llvm.sh "$LLVM_VER" all
             
-            # 安装内核编译所需的额外 LLVM 组件
             sudo apt-get install -y \
               clang-"$LLVM_VER" \
               lld-"$LLVM_VER" \
@@ -302,7 +302,6 @@ jobs:
               clang-tools-"$LLVM_VER" \
               clangd-"$LLVM_VER"
             
-            # 设置内核编译环境变量
             echo "COMPILER_NAME=LLVM ${LLVM_VER}" >> "$GITHUB_ENV"
             echo "CACHE_KEY_COMPILER=llvm-${LLVM_VER}" >> "$GITHUB_ENV"
             echo "MAKE_ARGS=LLVM=-${LLVM_VER} LLVM_IAS=-${LLVM_VER}" >> "$GITHUB_ENV"
@@ -332,7 +331,7 @@ jobs:
           ccache -s
 
       # -----------------------------------------------------------------------
-      # 步骤 8: 恢复 ccache 缓存（从之前的构建）
+      # 步骤 8: 恢复 ccache 缓存
       # -----------------------------------------------------------------------
       - name: ♻️ 恢复编译缓存
         uses: actions/cache/restore@v4
@@ -355,7 +354,6 @@ jobs:
           BRANCH="${{ inputs.kernel_branch }}"
           VERSION="${{ env.KERNEL_VERSION }}"
           
-          # 根据分支选择正确的 Git 仓库
           if [[ "$BRANCH" == "mainline" ]]; then
             REPO="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git"
             echo "🌿 使用主线仓库 (torvalds/linux)"
@@ -366,16 +364,14 @@ jobs:
           
           echo "📦 正在克隆 Linux $VERSION (标签: v$VERSION)..."
           
-          # 浅克隆指定标签
           git clone --depth=1 -b "v$VERSION" "$REPO" kernel/linux
           
-          # 验证检出
           cd kernel/linux
           ACTUAL_VER=$(make kernelversion 2>/dev/null || echo "未知")
           echo "✅ 源码就绪，Makefile 报告版本: $ACTUAL_VER"
 
       # -----------------------------------------------------------------------
-      # 步骤 10: 内核配置生成 (.config)（修复：移除 make|head broken pipe）
+      # 步骤 10: 内核配置生成 (.config)
       # -----------------------------------------------------------------------
       - name: ⚙️ 生成内核配置
         working-directory: kernel/linux
@@ -384,7 +380,6 @@ jobs:
           
           echo "🔧 正在生成内核配置..."
           
-          # 1. 基础配置来源
           if [[ -f "${{ github.workspace }}/kernel.config" ]]; then
             echo "📄 使用用户提供的 kernel.config 作为基础"
             cp "${{ github.workspace }}/kernel.config" .config
@@ -393,13 +388,11 @@ jobs:
             make ARCH=x86_64 defconfig
           fi
           
-          # 2. 关键兼容性修复 (避免常见编译失败)
           echo "🛡️ 应用兼容性补丁..."
           scripts/config --disable SYSTEM_TRUSTED_KEYS
           scripts/config --disable SYSTEM_REVOCATION_KEYS
           scripts/config --disable DEBUG_INFO_BTF
           
-          # 3. 用户自定义配置注入函数
           apply_config() {
             local file="$1"
             local mode="$2"
@@ -410,10 +403,8 @@ jobs:
             local count=0
             
             while IFS= read -r line || [[ -n "$line" ]]; do
-              # 跳过空行和注释
               [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
               
-              # 提取配置名 (处理 CONFIG_XXX=y/m/ 格式)
               local config_name=""
               if [[ "$line" =~ ^CONFIG_[A-Za-z0-9_]+ ]]; then
                 config_name=$(echo "$line" | grep -oE '^CONFIG_[A-Za-z0-9_]+')
@@ -433,28 +424,21 @@ jobs:
             echo "   └─ 已应用 $count 项配置"
           }
           
-          # 4. 依次应用三类配置（顺序重要: disable -> module -> enable）
           apply_config "${{ github.workspace }}/disabled_kernel_configs.txt" "disable"
           apply_config "${{ github.workspace }}/moduled_kernel_configs.txt" "module"
           apply_config "${{ github.workspace }}/enabled_kernel_configs.txt" "enable"
           
-          # 5. 解决配置依赖并生成最终 .config（修复：避免 make|head broken pipe）
-          # 原代码: make ... 2>&1 | head -20
-          # 修复: 捕获输出后再截断显示
           echo "🔄 解析配置依赖关系..."
           CONFIG_OUTPUT=$(make ARCH=x86_64 olddefconfig ${{ env.MAKE_ARGS }} 2>&1) || {
             echo "$CONFIG_OUTPUT"
             exit 1
           }
-          # 安全地显示前20行（避免 pipe 到 head 导致 broken pipe）
           echo "$CONFIG_OUTPUT" | (head -20 || true)
           
-          # 6. 保存配置副本用于调试
           mkdir -p ../configs
           cp .config ../configs/final.config
           echo "💾 最终配置已保存至 kernel/configs/final.config"
           
-          # 7. 配置摘要
           echo "📊 配置摘要:"
           local total enabled modules
           total=$(grep -c "^CONFIG_" .config 2>/dev/null || echo "0")
@@ -463,13 +447,12 @@ jobs:
           echo "   总配置项: $total, 内置: $enabled, 模块: $modules"
 
       # -----------------------------------------------------------------------
-      # 步骤 11: 编译内核（修复：完全避免 ${:-} 语法）
+      # 步骤 11: 编译内核
       # -----------------------------------------------------------------------
       - name: 🚀 编译内核
         working-directory: kernel/linux
         timeout-minutes: 340
         env:
-          # 在此处设置编译器，避免在 run 中使用 ${CC:-gcc}
           BUILD_CC: ${{ env.CC }}
           BUILD_CXX: ${{ env.CXX }}
         run: |
@@ -478,7 +461,6 @@ jobs:
           echo "🧹 清理旧编译产物..."
           make clean 2>/dev/null || true
           
-          # 设置编译器（使用 if 判断替代 ${:-} 语法）
           if [[ -n "$BUILD_CC" ]]; then
             CC_COMPILER="$BUILD_CC"
           else
@@ -498,7 +480,6 @@ jobs:
           echo "   本地版本后缀: -${{ env.CACHE_KEY_COMPILER }}-${{ env.RAND_SUFFIX }}"
           echo "   使用编译器: CC=$CC_COMPILER, CXX=$CXX_COMPILER"
           
-          # 执行编译
           if ! make ARCH=x86_64 bindeb-pkg \
             -j$(nproc) \
             LOCALVERSION="-${{ env.CACHE_KEY_COMPILER }}-${{ env.RAND_SUFFIX }}" \
@@ -509,7 +490,6 @@ jobs:
             
             echo "::error::❌ 编译失败！"
             echo "📄 错误日志（最后 200 行）："
-            # 安全地读取日志（避免使用 head -200 导致 broken pipe，虽然这里是从文件读取，但保持一致性）
             tail -n 200 ../build.log 2>/dev/null || cat ../build.log 2>/dev/null || echo "无法读取日志"
             exit 1
           fi
@@ -536,18 +516,15 @@ jobs:
           
           echo "🔍 检查构建产物..."
           
-          # 检查 deb 包存在性
           if ! ls *.deb >/dev/null 2>&1; then
             echo "::error::未找到任何 .deb 构建产物！"
             ls -la
             exit 1
           fi
           
-          # 生成 SHA256 校验和
           echo "📋 生成校验和..."
           sha256sum *.deb > checksums.txt
           
-          # 生成构建元数据
           {
             echo "BUILD_DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")"
             echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
@@ -558,7 +535,6 @@ jobs:
           } > build-metadata.txt
           
           echo "✅ 产物校验完成:"
-          # 使用 while read 循环（不会 broken pipe）替代 cat | head
           while IFS= read -r line || [[ -n "$line" ]]; do
             echo "   ✓ $line"
           done < checksums.txt
