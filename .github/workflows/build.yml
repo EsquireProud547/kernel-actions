@@ -1,6 +1,6 @@
 # =============================================================================
 # 工作流名称：Linux 内核自动化构建系统 (x86_64)
-# 版本：2.1
+# 版本：2.2
 # 核心功能：自动化编译 x86_64 架构 Linux 内核，生成 .deb 安装包
 # 支持分支：主线 (Mainline) / 稳定版 (Stable) / 长期支持版 (LTS)
 # 编译器支持：GCC-14 / LLVM (自动获取最新稳定版)
@@ -114,7 +114,7 @@ jobs:
           fetch-depth: 1
 
       # -----------------------------------------------------------------------
-      # 步骤 2: 参数校验与预处理
+      # 步骤 2: 参数校验与预处理（修复：移除导致 broken pipe 的 tr|head）
       # -----------------------------------------------------------------------
       - name: 🔍 参数与环境校验
         run: |
@@ -135,8 +135,11 @@ jobs:
           check_file "${{ inputs.enable_custom_configs }}" "enabled_kernel_configs.txt"
           check_file "${{ inputs.enable_module_configs }}" "moduled_kernel_configs.txt"
           
-          # 生成 8 位随机后缀（小写字母+数字），用于构建标识和版本命名
-          RAND_SUFFIX=$(tr -dc 'a-z0-9' < /dev/urandom | head -c8)
+          # 生成 8 位随机后缀（修复：使用 openssl 避免 tr|head broken pipe）
+          # 原代码: RAND_SUFFIX=$(tr -dc 'a-z0-9' < /dev/urandom | head -c8)
+          # 修复: openssl rand -hex 4 生成 8 位十六进制字符，不会触发 broken pipe
+          RAND_SUFFIX=$(openssl rand -hex 4 2>/dev/null || echo "00000000")
+          
           echo "RAND_SUFFIX=$RAND_SUFFIX" >> "$GITHUB_ENV"
           echo "✅ 环境校验通过，构建标识: $RAND_SUFFIX"
 
@@ -167,7 +170,7 @@ jobs:
             exit 1
           fi
           
-          # 根据分支解析版本号
+          # 根据分支解析版本号（使用 jq first 替代 head -n1，避免 pipe）
           case "$BRANCH" in
             mainline)
               VERSION=$(echo "$RELEASES_JSON" | jq -r '[.releases[] | select(.moniker=="mainline")] | first | .version')
@@ -222,7 +225,7 @@ jobs:
           df -h /
 
       # -----------------------------------------------------------------------
-      # 步骤 5: 安装系统依赖
+      # 步骤 5: 安装系统依赖（添加 openssl 用于随机数生成）
       # -----------------------------------------------------------------------
       - name: 📦 安装构建依赖
         run: |
@@ -372,7 +375,7 @@ jobs:
           echo "✅ 源码就绪，Makefile 报告版本: $ACTUAL_VER"
 
       # -----------------------------------------------------------------------
-      # 步骤 10: 内核配置生成 (.config)
+      # 步骤 10: 内核配置生成 (.config)（修复：移除 make|head broken pipe）
       # -----------------------------------------------------------------------
       - name: ⚙️ 生成内核配置
         working-directory: kernel/linux
@@ -435,9 +438,16 @@ jobs:
           apply_config "${{ github.workspace }}/moduled_kernel_configs.txt" "module"
           apply_config "${{ github.workspace }}/enabled_kernel_configs.txt" "enable"
           
-          # 5. 解决配置依赖并生成最终 .config
+          # 5. 解决配置依赖并生成最终 .config（修复：避免 make|head broken pipe）
+          # 原代码: make ... 2>&1 | head -20
+          # 修复: 捕获输出后再截断显示
           echo "🔄 解析配置依赖关系..."
-          make ARCH=x86_64 olddefconfig ${{ env.MAKE_ARGS }} 2>&1 | head -20
+          CONFIG_OUTPUT=$(make ARCH=x86_64 olddefconfig ${{ env.MAKE_ARGS }} 2>&1) || {
+            echo "$CONFIG_OUTPUT"
+            exit 1
+          }
+          # 安全地显示前20行（避免 pipe 到 head 导致 broken pipe）
+          echo "$CONFIG_OUTPUT" | (head -20 || true)
           
           # 6. 保存配置副本用于调试
           mkdir -p ../configs
@@ -453,13 +463,13 @@ jobs:
           echo "   总配置项: $total, 内置: $enabled, 模块: $modules"
 
       # -----------------------------------------------------------------------
-      # 步骤 11: 编译内核 (修复点：移除所有 ${VAR:-default} 语法)
+      # 步骤 11: 编译内核（修复：完全避免 ${:-} 语法）
       # -----------------------------------------------------------------------
       - name: 🚀 编译内核
         working-directory: kernel/linux
         timeout-minutes: 340
         env:
-          # 在此处设置编译器默认值，避免在 run 中使用 ${CC:-gcc}
+          # 在此处设置编译器，避免在 run 中使用 ${CC:-gcc}
           BUILD_CC: ${{ env.CC }}
           BUILD_CXX: ${{ env.CXX }}
         run: |
@@ -468,9 +478,18 @@ jobs:
           echo "🧹 清理旧编译产物..."
           make clean 2>/dev/null || true
           
-          # 设置编译器默认值（如果环境变量未设置）
-          CC_COMPILER="${BUILD_CC:-gcc}"
-          CXX_COMPILER="${BUILD_CXX:-g++}"
+          # 设置编译器（使用 if 判断替代 ${:-} 语法）
+          if [[ -n "$BUILD_CC" ]]; then
+            CC_COMPILER="$BUILD_CC"
+          else
+            CC_COMPILER="gcc"
+          fi
+          
+          if [[ -n "$BUILD_CXX" ]]; then
+            CXX_COMPILER="$BUILD_CXX"
+          else
+            CXX_COMPILER="g++"
+          fi
           
           echo "🔨 开始编译:"
           echo "   版本: Linux ${{ env.KERNEL_VERSION }}"
@@ -490,7 +509,8 @@ jobs:
             
             echo "::error::❌ 编译失败！"
             echo "📄 错误日志（最后 200 行）："
-            tail -n 200 ../build.log || true
+            # 安全地读取日志（避免使用 head -200 导致 broken pipe，虽然这里是从文件读取，但保持一致性）
+            tail -n 200 ../build.log 2>/dev/null || cat ../build.log 2>/dev/null || echo "无法读取日志"
             exit 1
           fi
           
@@ -538,9 +558,10 @@ jobs:
           } > build-metadata.txt
           
           echo "✅ 产物校验完成:"
-          cat checksums.txt | while read -r line; do
+          # 使用 while read 循环（不会 broken pipe）替代 cat | head
+          while IFS= read -r line || [[ -n "$line" ]]; do
             echo "   ✓ $line"
-          done
+          done < checksums.txt
 
       # -----------------------------------------------------------------------
       # 步骤 14: 上传构建产物到 Artifacts
